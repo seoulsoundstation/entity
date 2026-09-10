@@ -12,6 +12,16 @@ from .config import Config
 from .progress import TaskControl
 
 
+ARTICLE_BODY_SELECTORS = ('div.se-main-container', '#postViewArea', 'div.post_ct')
+# These are Naver's page controls, not text or URL patterns: a post may itself
+# discuss adding neighbors or intentionally link to a category.
+BLOG_CHROME_SELECTOR = ', '.join((
+    '.se-documentTitle', '.blog_category', '.blog_authorArea', '.blog_btnArea',
+    '.post_function_t1', 'a.btn_buddyadd', 'a._add_buddy',
+))
+NON_CONTENT_SELECTOR = 'script, style, noscript, ' + BLOG_CHROME_SELECTOR
+
+
 def original_image_url(url: str) -> str:
     if url.startswith('//'):
         url = 'https:' + url
@@ -187,13 +197,19 @@ class Renderer:
                 self.check()
                 if response is None or response.status >= 400:
                     raise RuntimeError(f'글 응답 HTTP {response.status if response else "없음"}')
-                self.page.locator('div.se-main-container, #postViewArea, div.post_ct').first.wait_for(
+                self.page.locator(', '.join(ARTICLE_BODY_SELECTORS)).first.wait_for(
                     state='attached', timeout=self.config.timeout * 1000)
                 self.check()
-                self.page.wait_for_function('''() => {
-                    const body = document.querySelector('div.se-main-container, #postViewArea, div.post_ct');
-                    return body && (body.innerText.trim() || body.querySelector('img, video, iframe, audio'));
-                }''', timeout=self.config.timeout * 1000)
+                self.page.wait_for_function('''({selectors, excluded}) => {
+                    // A combined query picks the outer wrapper first and can
+                    // mistake its navigation for an already-loaded article.
+                    const body = selectors.map(selector => document.querySelector(selector)).find(Boolean);
+                    if (!body) return false;
+                    const content = body.cloneNode(true);
+                    content.querySelectorAll(excluded).forEach(element => element.remove());
+                    return !!(content.textContent.trim() || content.querySelector('img, video, iframe, audio'));
+                }''', arg={'selectors': ARTICLE_BODY_SELECTORS, 'excluded': NON_CONTENT_SELECTOR},
+                    timeout=self.config.timeout * 1000)
                 self.check()
                 return self.page.content()
             except Exception:

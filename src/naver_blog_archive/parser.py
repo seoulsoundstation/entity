@@ -9,7 +9,7 @@ from uuid import uuid4
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
-from .network import parse_post_url, post_url
+from .network import ARTICLE_BODY_SELECTORS, NON_CONTENT_SELECTOR, parse_post_url, post_url
 
 
 def md_link(label: str, url: str, image: bool = False) -> str:
@@ -85,7 +85,7 @@ def extract_post(html: str, blog: str, post: str) -> dict:
     soup = BeautifulSoup(html, 'html.parser')
     # A combined CSS selector returns the first element in document order,
     # so an outer post_ct wrapper can otherwise win over the actual article.
-    body = next((element for selector in ('div.se-main-container', '#postViewArea', 'div.post_ct')
+    body = next((element for selector in ARTICLE_BODY_SELECTORS
                  if (element := soup.select_one(selector)) is not None), None)
     if body is None:
         raise ValueError('본문 영역을 찾지 못했습니다. 비공개·삭제·오류 페이지 또는 형식 변경을 확인하세요.')
@@ -97,8 +97,11 @@ def extract_post(html: str, blog: str, post: str) -> dict:
     title = title.strip() or post
     published = soup.select_one('meta[property="article:published_time"], time[datetime]')
     published_at = (published.get('content') or published.get('datetime')) if published else None
-    for element in body.select('script, style, noscript'):
-        element.decompose()
+    # Read the title/date above before removing the page header. Keep authored
+    # text and links even when their labels mention Naver's navigation.
+    for element in body.select(NON_CONTENT_SELECTOR):
+        if element.parent is not None:
+            element.decompose()
     prefix = 'NBATOKEN' + uuid4().hex.upper()
     sources, images = [], []
     _extract_link_cards(body, post_url(blog, post), prefix, sources, images)

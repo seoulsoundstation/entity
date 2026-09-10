@@ -11,6 +11,7 @@ from urllib.parse import quote, urlsplit
 
 from .assets import Assets
 from .cached_cards import upgrade_link_cards
+from .cached_navigation import clean_cached_navigation
 from .config import Config
 from .files import archive_lock, atomic_write, digest, inside
 from .network import Client, Renderer, parse_post_url, post_url
@@ -175,8 +176,8 @@ def format_link_card(source: dict, thumbnail: str | None, local_href: str | None
     return '\n'.join('> ' + line if line else '>' for line in lines)
 
 
-def upgrade_cached_cards(config: Config, state: State, control: TaskControl) -> int:
-    count = 0
+def upgrade_cached_documents(config: Config, state: State, control: TaskControl) -> dict[str, int]:
+    counts = {}
     for row in active_rows(config, state.posts()):
         control.check()
         if not row['document']:
@@ -185,13 +186,18 @@ def upgrade_cached_cards(config: Config, state: State, control: TaskControl) -> 
             path = inside(config.out_dir, row['path'])
             if path.exists() and (not row['file_hash'] or digest(path) != row['file_hash']):
                 continue
-        document, upgraded = upgrade_link_cards(json.loads(row['document']))
-        if upgraded:
+        document, cleaned = clean_cached_navigation(json.loads(row['document']))
+        document, upgraded = upgrade_link_cards(document)
+        if cleaned or upgraded:
             state.update(row['blog'], row['post'], document=json.dumps(document, ensure_ascii=False),
-                         status='partial', content_ok=0, error='링크 미리보기 정리 필요')
-            count += upgraded
-            control.emit('formatting', f'링크 미리보기 {upgraded}개 정리: {row["blog"]}/{row["post"]}')
-    return count
+                         status='partial', content_ok=0, error='저장 본문 정리 필요')
+            if cleaned:
+                counts['navigation_posts'] = counts.get('navigation_posts', 0) + 1
+                control.emit('formatting', f'블로그 메뉴 제거: {row["blog"]}/{row["post"]}')
+            if upgraded:
+                counts['cards'] = counts.get('cards', 0) + upgraded
+                control.emit('formatting', f'링크 미리보기 {upgraded}개 정리: {row["blog"]}/{row["post"]}')
+    return counts
 
 
 def verify_files(config: Config, state: State, control: TaskControl | None = None) -> list[str]:
@@ -342,7 +348,7 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                 raise ValueError('; '.join(move_problems))
             scan_legacy(config, state, control)
             verify_files(config, state, control)
-            upgraded_cards = upgrade_cached_cards(config, state, control)
+            upgraded_documents = upgrade_cached_documents(config, state, control)
             control.check()
             control.emit('listing', '공개 글 목록 확인 중', listed=0)
             listing = client.listing(config.blog_id)
@@ -444,9 +450,7 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
             incomplete = bool(output_problems) or any(r['status'] != 'success' for r in active_rows(config, state.posts()))
             state.finish(run_id, 'partial' if incomplete or not listing.complete else 'success')
             report = make_report(config, state)
-            report['output_counts'] = {'renamed': renamed}
-            if upgraded_cards:
-                report['output_counts']['cards'] = upgraded_cards
+            report['output_counts'] = {'renamed': renamed, **upgraded_documents}
             report['output_problems'] = output_problems
             report['run_counts'] = completed_run_counts(active_rows(config, state.posts()), attempted, reused)
             atomic_write(config.out_dir / 'report.json', json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8'))
@@ -519,7 +523,7 @@ def reformat_archive(config: Config, *, control: TaskControl | None = None) -> d
             if problems:
                 raise ValueError('; '.join(problems))
             verify_files(config, state, control)
-            upgraded_cards = upgrade_cached_cards(config, state, control)
+            upgraded_documents = upgrade_cached_documents(config, state, control)
             renamed, problems = migrate_note_names(config, state, control, rows=active_rows(config, state.posts()))
             updated = 0
             rows = active_rows(config, state.posts())
@@ -553,9 +557,7 @@ def reformat_archive(config: Config, *, control: TaskControl | None = None) -> d
                         problems.append(str(exc))
             control.check()
             report = make_report(config, state)
-            report['output_counts'] = {'renamed': renamed, 'updated': updated}
-            if upgraded_cards:
-                report['output_counts']['cards'] = upgraded_cards
+            report['output_counts'] = {'renamed': renamed, 'updated': updated, **upgraded_documents}
             report['output_problems'] = list(dict.fromkeys(problems))
             atomic_write(config.out_dir / 'formatting.json', json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8'))
             control.emit('finished', '저장 결과 정리 완료', report=report)

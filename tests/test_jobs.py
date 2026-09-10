@@ -197,7 +197,8 @@ def test_environment_diagnostics_need_no_blog_and_forward_console_output(monkeyp
                                                    ([], [{'status': 'partial'}], 'partial')])
 def test_reformat_runs_off_thread_and_reports_changes_without_a_backup(tmp_path, monkeypatch, problems, failures, status):
     caller = current_thread()
-    report = {'output_counts': {'renamed': 7, 'updated': 3}, 'output_problems': problems, 'failures': failures}
+    report = {'output_counts': {'renamed': 7, 'updated': 3, 'navigation_posts': 2, 'cards': 4},
+              'output_problems': problems, 'failures': failures}
     def reformat(config, *, control):
         assert current_thread() is not caller
         control.check()
@@ -209,3 +210,5 @@ def test_reformat_runs_off_thread_and_reports_changes_without_a_backup(tmp_path,
     assert done['status'] == status
     assert done['report'] is report
     assert '7개' in done['message'] and '3회' in done['message']
+    assert '블로그 메뉴 2개 글에서 제거' in done['message']
+    assert '링크 카드 4개 정리' in done['message']
