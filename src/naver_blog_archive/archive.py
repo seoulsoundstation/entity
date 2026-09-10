@@ -126,8 +126,11 @@ def format_note(config: Config, state: State, row, download=None):
         if source.get('kind') == 'link_card':
             local_href = None
             saved = state.get(*target) if target else None
-            if saved and saved['content_ok'] and saved['path'] and inside(config.out_dir, saved['path']).is_file():
-                local_href = quote(Path(os.path.relpath(inside(config.out_dir, saved['path']), base)).as_posix(), safe='/')
+            local_path = inside(config.out_dir, saved['path']) if saved and saved['path'] else None
+            # A readable note is still a valid destination when its images are
+            # incomplete or the user has edited it. Write protection is separate.
+            if local_path and local_path.suffix.lower() == '.md' and local_path.is_file():
+                local_href = quote(Path(os.path.relpath(local_path, base)).as_posix(), safe='/')
             replacements[source['token']] = format_link_card(source, image_targets.get(source.get('thumbnail_token')), local_href)
             continue
         follow = config.follow_sources and row['depth'] < config.source_depth
@@ -155,11 +158,12 @@ def format_link_card(source: dict, thumbnail: str | None, local_href: str | None
     description = re.sub(r'^(\d+)([.)]) ', r'\1\\\2 ', description)
     title = re.sub(r'([\\`*_{}\[\]<>|~=$])', r'\\\1', title)
     domain = urlsplit(source['url']).hostname or source.get('domain') or '원문'
-    lines = ['[!info] [' + title + '](' + quote(source['url'], safe='/:?&=%+#@;,') + ')']
+    destination = quote(local_href or source['url'], safe='/:?&=%+#@;,')
+    lines = ['[!info] [' + title + '](' + destination + ')']
     if thumbnail:
         # A numeric image label is Obsidian's Markdown image-width syntax.
         image = md_link('320', thumbnail, image=True)
-        lines.extend(['', '[' + image + '](' + quote(source['url'], safe='/:?&=%+#@;,') + ')'])
+        lines.extend(['', '[' + image + '](' + destination + ')'])
     elif source.get('thumbnail_token'):
         lines.extend(['', '썸네일을 저장하지 못했습니다.'])
     if description:

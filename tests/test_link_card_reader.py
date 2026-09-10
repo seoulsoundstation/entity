@@ -1,10 +1,11 @@
 """Reading views preserve link-card context and safe, portable thumbnails."""
 import os
-from urllib.parse import unquote
+from urllib.parse import quote, unquote, urlsplit
 
 from bs4 import BeautifulSoup
 import pytest
 
+from naver_blog_archive.archive import format_link_card
 from naver_blog_archive.config import Config
 from naver_blog_archive.reader import create_preview
 
@@ -19,19 +20,23 @@ def saved_card(tmp_path, markdown):
     return config, row, source
 
 
-CARD = '''> [!info] [2019년 포트폴리오 생각](https://blog.naver.com/source/987654321)
->
-> [![320](../../attachments/경제%20흐름.png)](https://blog.naver.com/source/987654321)
->
-> 2019년 포트폴리오는 어떻게 짜야 할까? 경제 흐름을 살펴봅니다.
->
-> [blog.naver.com ↗](https://blog.naver.com/source/987654321) · [보관된 글 열기](../source/포트폴리오.md)
-'''
+SOURCE_URL = 'https://blog.naver.com/source/987654321'
+LOCAL_NOTE = 'posts/source/포트폴리오 생각 #3 (987654321).md'
+CARD = format_link_card(
+    {'url': SOURCE_URL, 'title': '2019년 포트폴리오 생각',
+     'description': '2019년 포트폴리오는 어떻게 짜야 할까? 경제 흐름을 살펴봅니다.'},
+    '../../attachments/경제%20흐름.png',
+    quote('../source/포트폴리오 생각 #3 (987654321).md', safe='/'),
+)
 
 
 def test_card_reader_formats_link_preview_and_preserves_markdown(tmp_path):
     config, row, source = saved_card(tmp_path, '# 링크를 모은 글\n\n' + CARD)
+    destination = config.out_dir / LOCAL_NOTE
+    destination.parent.mkdir(parents=True)
+    destination.write_text('# 보관된 원본 글\n', encoding='utf-8')
     before = source.read_bytes(), source.stat().st_mtime_ns
+    destination_before = destination.read_bytes(), destination.stat().st_mtime_ns
     preview = create_preview(config, row)
     soup = BeautifulSoup(preview.read_text(encoding='utf-8'), 'html.parser')
     card = soup.select_one('blockquote.link-card')
@@ -43,12 +48,18 @@ def test_card_reader_formats_link_preview_and_preserves_markdown(tmp_path):
     assert image['width'] == '320'
     assert image['alt'] == '2019년 포트폴리오 생각 썸네일'
     assert (preview.parent / unquote(image['src'])).resolve() == (config.out_dir / 'attachments/경제 흐름.png').resolve()
-    assert image.parent['href'] == 'https://blog.naver.com/source/987654321'
     assert '경제 흐름' in card.select_one('.link-card-description').get_text()
     local_link = card.select_one('.link-card-footer').find('a', string='보관된 글 열기')
-    assert (preview.parent / unquote(local_link['href'])).resolve() == (config.out_dir / 'posts/source/포트폴리오.md').resolve()
+    for link in (card.select_one('.link-card-title a'), image.parent, local_link):
+        parts = urlsplit(link['href'])
+        assert not parts.scheme and not parts.netloc and not parts.fragment
+        assert '%23' in parts.path
+        assert (preview.parent / unquote(parts.path)).resolve() == destination.resolve()
+    web_link = card.select_one('.link-card-footer').find('a', string='blog.naver.com ↗')
+    assert web_link['href'] == SOURCE_URL
     assert all(link['rel'] == ['noopener', 'noreferrer'] for link in card.find_all('a'))
     assert before == (source.read_bytes(), source.stat().st_mtime_ns)
+    assert destination_before == (destination.read_bytes(), destination.stat().st_mtime_ns)
 
 
 def test_card_without_thumbnail_or_excerpt_and_ordinary_quotes_remain_distinct(tmp_path):
@@ -121,5 +132,9 @@ def test_browser_loads_card_thumbnail_without_cropping_at_mobile_width(tmp_path)
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert page.locator('.link-card-title').inner_text() == '2019년 포트폴리오 생각'
             assert '[!info]' not in page.locator('.link-card').inner_text()
+            expected = (config.out_dir / LOCAL_NOTE).resolve().as_uri()
+            for selector in ('.link-card-title a', '.link-card-thumbnail a'):
+                assert page.locator(selector).evaluate('(link) => link.href') == expected
+            assert page.locator('.link-card-footer a').first.evaluate('(link) => link.href') == SOURCE_URL
         finally:
             browser.close()
