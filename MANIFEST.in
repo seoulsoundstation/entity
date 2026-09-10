@@ -1,0 +1,7 @@
+include config.example.toml
+include constraints-tested.txt
+include start-gui.bat
+include setup.bat
+recursive-include scripts *.bat
+recursive-include legacy *.py *.bat
+recursive-include tests *.py

@@ -1,0 +1,14 @@
+blog_id = "tmdejr1267"
+out_dir = "naver_blog_backup"
+delay = 0.5
+download_images = true
+follow_sources = true
+
+# 상대 out_dir는 이 설정 파일 위치를 기준으로 해석합니다.
+# 기본값은 인용 원본을 한 단계까지만 저장합니다 (0~3).
+source_depth = 1
+# 요청 최대 시도 횟수와 요청/렌더링 제한 시간(초)
+retries = 3
+timeout = 30
+max_image_mb = 30
+max_pages = 10000

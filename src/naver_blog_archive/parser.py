@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import re
+from urllib.parse import quote, urljoin, urlsplit
+from uuid import uuid4
+
+from bs4 import BeautifulSoup
+from markdownify import markdownify
+
+from .network import parse_post_url, post_url
+
+
+def md_link(label: str, url: str, image: bool = False) -> str:
+    label = re.sub(r'([\\\[\]|])', r'\\\1', re.sub(r'[\r\n]+', ' ', label))
+    return f'{"!" if image else ""}[{label}]({quote(url, safe="/:?&=%+#@;,")})'
+
+
+def image_source(img, base_url: str) -> str:
+    # Lazy-load placeholders must not hide a usable regular source. Browsers
+    # tolerate surrounding whitespace in HTML URL attributes; downloads need
+    # the same normalization.
+    for attribute in ('data-lazy-src', 'data-src', 'src'):
+        value = str(img.get(attribute) or '').strip()
+        if not value:
+            continue
+        try:
+            candidate = urljoin(base_url, value)
+            if urlsplit(candidate).scheme in ('http', 'https'):
+                return candidate
+        except ValueError:
+            continue
+    return ''
+
+
+def extract_post(html: str, blog: str, post: str) -> dict:
+    soup = BeautifulSoup(html, 'html.parser')
+    # A combined CSS selector returns the first element in document order,
+    # so an outer post_ct wrapper can otherwise win over the actual article.
+    body = next((element for selector in ('div.se-main-container', '#postViewArea', 'div.post_ct')
+                 if (element := soup.select_one(selector)) is not None), None)
+    if body is None:
+        raise ValueError('본문 영역을 찾지 못했습니다. 비공개·삭제·오류 페이지 또는 형식 변경을 확인하세요.')
+    title_el = soup.select_one('div.se-title-text, .se_title, h3.tit_h3')
+    meta = soup.select_one('meta[property="og:title"]')
+    title = title_el.get_text(' ', strip=True) if title_el else (meta.get('content', '') if meta else '')
+    if not title and soup.title:
+        title = soup.title.get_text(' ', strip=True)
+    title = title.strip() or post
+    published = soup.select_one('meta[property="article:published_time"], time[datetime]')
+    published_at = (published.get('content') or published.get('datetime')) if published else None
+    for element in body.select('script, style, noscript'):
+        element.decompose()
+    prefix = 'NBATOKEN' + uuid4().hex.upper()
+    sources, images = [], []
+    # Extract before Markdown conversion; source content is replaced in its original position.
+    for section in list(body.select('div.se_sectionArea')):
+        a = section.find('a', href=True)
+        if not a:
+            continue
+        url = urljoin(post_url(blog, post), a['href'])
+        token = prefix + 'SOURCE' + str(len(sources))
+        sources.append({'token': token, 'url': url, 'title': a.get_text(' ', strip=True) or '출처',
+                        'target': parse_post_url(url)})
+        section.replace_with('\n' + token + '\n')
+    # Remove photo-only links once, before replacing any of their children.
+    # A link can contain several images; replacing the whole link per image
+    # would discard its siblings and then try to replace a detached element.
+    for anchor in list(body.find_all('a')):
+        if anchor.find('img') and not anchor.get_text(strip=True):
+            anchor.unwrap()
+    for img in list(body.find_all('img')):
+        src = image_source(img, post_url(blog, post))
+        token = prefix + 'IMAGE' + str(len(images))
+        images.append({'token': token, 'url': src, 'alt': img.get('alt', '')})
+        img.replace_with('\n' + token + '\n')
+    for media in list(body.select('iframe, video, audio')):
+        src = media.get('src')
+        if not src:
+            child = media.find('source', src=True)
+            src = child.get('src') if child else None
+        if src:
+            link = soup.new_tag('a', href=urljoin(post_url(blog, post), src))
+            link.string = '미디어 원본'
+            media.replace_with(link)
+        else:
+            media.replace_with('[미디어: 원문에서 확인]')
+    if not body.get_text(strip=True):
+        raise ValueError('본문 영역이 비어 있어 저장하지 않았습니다.')
+    markdown = markdownify(str(body), heading_style='ATX').strip()
+    if not markdown:
+        raise ValueError('Markdown 변환 결과가 비어 있습니다.')
+    return {'title': title, 'blog_id': blog, 'post_id': post, 'markdown': markdown,
+            'images': images, 'sources': sources, 'published_at': published_at,
+            'archived_at': datetime.now(timezone.utc).isoformat()}
+
+
+def compose(document: dict, replacements: dict[str, str]) -> bytes:
+    body = document['markdown']
+    if replacements:
+        # IMAGE1 is a prefix of IMAGE10 in existing cached documents. Match
+        # longest tokens first in one pass, without reprocessing inserted text.
+        pattern = '|'.join(re.escape(token) for token in sorted(replacements, key=len, reverse=True))
+        body = re.sub(pattern, lambda match: replacements[match.group()], body)
+    metadata = {key: document[key] for key in ('title', 'blog_id', 'post_id', 'archived_at')}
+    metadata['source_url'] = post_url(document['blog_id'], document['post_id'])
+    if document.get('published_at'):
+        metadata['published_at'] = document['published_at']
+    # JSON scalar strings are valid YAML and safely handle quotes in titles.
+    frontmatter = '\n'.join(f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in metadata.items())
+    title = document['title'].replace('\n', ' ')
+    return f'---\n{frontmatter}\n---\n\n# {title}\n\n{body}\n'.encode('utf-8')
