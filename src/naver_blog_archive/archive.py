@@ -10,6 +10,7 @@ import re
 from urllib.parse import quote, urlsplit
 
 from .assets import Assets
+from .cached_cards import upgrade_link_cards
 from .config import Config
 from .files import archive_lock, atomic_write, digest, inside
 from .network import Client, Renderer, parse_post_url, post_url
@@ -35,6 +36,8 @@ def active_rows(config: Config, rows) -> list[dict]:
         if not config.follow_sources or depth >= config.source_depth or not row['document']:
             continue
         for source in json.loads(row['document'])['sources']:
+            if source.get('kind') == 'link_card':
+                continue
             target = source.get('target')
             target = tuple(target) if target else None
             if target in by_key and target not in depths:
@@ -100,7 +103,7 @@ def write_note(config: Config, state: State, row, content: bytes):
 
 def format_note(config: Config, state: State, row, download=None):
     document = json.loads(row['document'])
-    replacements, errors = {}, []
+    replacements, errors, image_targets = {}, [], {}
     relative = row['path'] or titled_path(config, row)
     base = inside(config.out_dir, relative).parent
     for image in document['images']:
@@ -116,9 +119,17 @@ def format_note(config: Config, state: State, row, download=None):
                 errors.append('이미지 저장 실패: ' + image['url'])
         target = quote(Path(os.path.relpath(inside(config.out_dir, local), base)).as_posix(), safe='/') if local else image['url']
         replacements[image['token']] = md_link(image['alt'], target, image=True) if target else '[이미지 URL 누락]'
+        image_targets[image['token']] = target if local or not config.download_images else None
     for source in document['sources']:
         target = source.get('target')
         href = source['url']
+        if source.get('kind') == 'link_card':
+            local_href = None
+            saved = state.get(*target) if target else None
+            if saved and saved['content_ok'] and saved['path'] and inside(config.out_dir, saved['path']).is_file():
+                local_href = quote(Path(os.path.relpath(inside(config.out_dir, saved['path']), base)).as_posix(), safe='/')
+            replacements[source['token']] = format_link_card(source, image_targets.get(source.get('thumbnail_token')), local_href)
+            continue
         follow = config.follow_sources and row['depth'] < config.source_depth
         if follow and target:
             saved = state.get(*target)
@@ -130,6 +141,53 @@ def format_note(config: Config, state: State, row, download=None):
             errors.append('출처 주소 확인 실패: ' + source['url'])
         replacements[source['token']] = '> 출처: ' + md_link(source['title'], href) + ' · ' + md_link('원문', source['url'])
     return compose(document, replacements), errors
+
+
+def format_link_card(source: dict, thumbnail: str | None, local_href: str | None = None) -> str:
+    """A native Obsidian callout, also readable as ordinary Markdown."""
+    title = re.sub(r'\s+', ' ', source.get('title') or source['url']).strip()
+    description = re.sub(r'\s+', ' ', source.get('description') or '').strip()
+    if len(description) > 200:
+        description = description[:199].rstrip() + '…'
+    # Card excerpts are text taken from the original preview, not Markdown or
+    # a newly generated summary. Escape syntax that could change their layout.
+    description = re.sub(r'([\\`*_{}\[\]<>#|+~=$-])', r'\\\1', description)
+    description = re.sub(r'^(\d+)([.)]) ', r'\1\\\2 ', description)
+    title = re.sub(r'([\\`*_{}\[\]<>|~=$])', r'\\\1', title)
+    domain = urlsplit(source['url']).hostname or source.get('domain') or '원문'
+    lines = ['[!info] [' + title + '](' + quote(source['url'], safe='/:?&=%+#@;,') + ')']
+    if thumbnail:
+        # A numeric image label is Obsidian's Markdown image-width syntax.
+        image = md_link('320', thumbnail, image=True)
+        lines.extend(['', '[' + image + '](' + quote(source['url'], safe='/:?&=%+#@;,') + ')'])
+    elif source.get('thumbnail_token'):
+        lines.extend(['', '썸네일을 저장하지 못했습니다.'])
+    if description:
+        lines.extend(['', description])
+    footer = md_link(domain + ' ↗', source['url'])
+    if local_href:
+        footer += ' · ' + md_link('보관된 글 열기', local_href)
+    lines.extend(['', footer])
+    return '\n'.join('> ' + line if line else '>' for line in lines)
+
+
+def upgrade_cached_cards(config: Config, state: State, control: TaskControl) -> int:
+    count = 0
+    for row in active_rows(config, state.posts()):
+        control.check()
+        if not row['document']:
+            continue
+        if row['path']:
+            path = inside(config.out_dir, row['path'])
+            if path.exists() and (not row['file_hash'] or digest(path) != row['file_hash']):
+                continue
+        document, upgraded = upgrade_link_cards(json.loads(row['document']))
+        if upgraded:
+            state.update(row['blog'], row['post'], document=json.dumps(document, ensure_ascii=False),
+                         status='partial', content_ok=0, error='링크 미리보기 정리 필요')
+            count += upgraded
+            control.emit('formatting', f'링크 미리보기 {upgraded}개 정리: {row["blog"]}/{row["post"]}')
+    return count
 
 
 def verify_files(config: Config, state: State, control: TaskControl | None = None) -> list[str]:
@@ -223,6 +281,8 @@ def discover_sources(config: Config, state: State, client, control: TaskControl,
         return
     for source in document['sources']:
         control.check()
+        if source.get('kind') == 'link_card':
+            continue
         source.pop('resolve_error', None)
         if not source.get('target') and urlsplit(source['url']).hostname == 'naver.me':
             try:
@@ -239,7 +299,7 @@ def reusable_post(config: Config, row, document) -> bool:
     # A larger citation depth or newly enabled source collection can expose a
     # short URL that the preceding offline file verification cannot resolve.
     return not (config.follow_sources and row['depth'] < config.source_depth
-                and any(not source.get('target') and urlsplit(source['url']).hostname == 'naver.me'
+                and any(source.get('kind') != 'link_card' and not source.get('target') and urlsplit(source['url']).hostname == 'naver.me'
                         for source in document['sources']))
 
 
@@ -278,6 +338,7 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                 raise ValueError('; '.join(move_problems))
             scan_legacy(config, state, control)
             verify_files(config, state, control)
+            upgraded_cards = upgrade_cached_cards(config, state, control)
             control.check()
             control.emit('listing', '공개 글 목록 확인 중', listed=0)
             listing = client.listing(config.blog_id)
@@ -380,6 +441,8 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
             state.finish(run_id, 'partial' if incomplete or not listing.complete else 'success')
             report = make_report(config, state)
             report['output_counts'] = {'renamed': renamed}
+            if upgraded_cards:
+                report['output_counts']['cards'] = upgraded_cards
             report['output_problems'] = output_problems
             report['run_counts'] = completed_run_counts(active_rows(config, state.posts()), attempted, reused)
             atomic_write(config.out_dir / 'report.json', json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8'))
@@ -452,6 +515,7 @@ def reformat_archive(config: Config, *, control: TaskControl | None = None) -> d
             if problems:
                 raise ValueError('; '.join(problems))
             verify_files(config, state, control)
+            upgraded_cards = upgrade_cached_cards(config, state, control)
             renamed, problems = migrate_note_names(config, state, control, rows=active_rows(config, state.posts()))
             updated = 0
             rows = active_rows(config, state.posts())
@@ -486,6 +550,8 @@ def reformat_archive(config: Config, *, control: TaskControl | None = None) -> d
             control.check()
             report = make_report(config, state)
             report['output_counts'] = {'renamed': renamed, 'updated': updated}
+            if upgraded_cards:
+                report['output_counts']['cards'] = upgraded_cards
             report['output_problems'] = list(dict.fromkeys(problems))
             atomic_write(config.out_dir / 'formatting.json', json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8'))
             control.emit('finished', '저장 결과 정리 완료', report=report)

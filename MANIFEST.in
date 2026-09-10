@@ -5,3 +5,4 @@ include setup.bat
 recursive-include scripts *.bat
 recursive-include legacy *.py *.bat
 recursive-include tests *.py
+recursive-include tests/fixtures *.html

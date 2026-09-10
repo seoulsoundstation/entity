@@ -59,6 +59,7 @@ class JobRunner:
                     counts = report['output_counts']
                     status = 'partial' if report.get('output_problems') or report.get('failures') else 'success'
                     message = (f'파일명 {counts["renamed"]:,}개 변경 · Markdown {counts["updated"]:,}회 갱신. '
+                               + (f'링크 카드 {counts["cards"]:,}개 정리. ' if counts.get('cards') else '')
                                + ('확인할 항목을 확인하세요. 누락된 이미지는 백업 시 재시도합니다.' if status == 'partial'
                                   else '사진과 함께 읽기는 저장 글 검색에서 이용하세요.'))
                 else:

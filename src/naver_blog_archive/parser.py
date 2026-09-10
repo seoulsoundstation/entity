@@ -34,6 +34,53 @@ def image_source(img, base_url: str) -> str:
     return ''
 
 
+def _extract_link_cards(body, base_url: str, prefix: str, sources: list, images: list):
+    # SmartEditor ONE and older SmartEditor cards wrap a thumbnail link and a
+    # separate text link. Replacing the complete component keeps them together
+    # instead of producing one long, multiline Markdown link.
+    cards = list(body.select('.se-oglink, .se-module-oglink, .se_oglink, .se_og_box, .og-tag'))
+    card_ids = {id(card) for card in cards}
+    for card in cards:
+        if any(id(parent) in card_ids for parent in card.parents):
+            continue
+        anchor = card.select_one('a.se-oglink-info[href], a.se_og_text[href]')
+        if anchor is None:
+            anchor = card.find('a', href=True)
+        if anchor is None:
+            continue
+        try:
+            url = urljoin(base_url, str(anchor['href']).strip())
+            parts = urlsplit(url)
+            if parts.scheme not in ('http', 'https') or not parts.hostname:
+                continue
+        except ValueError:
+            continue
+        title_element = card.select_one('.se-oglink-title, .se_og_title, .og-title, .og_title')
+        if title_element is None:
+            title_element = anchor.find(['strong', 'h3', 'h4'])
+        title = (title_element.get_text(' ', strip=True) if title_element is not None
+                 else anchor.get('title') or anchor.get_text(' ', strip=True))
+        title = ' '.join(str(title).split()) or parts.hostname
+        description_element = card.select_one(
+            '.se-oglink-summary, .se_og_desc, .se_og_summary, .og-description, .og-desc, .og_description')
+        description = (' '.join(description_element.get_text(' ', strip=True).split())
+                       if description_element is not None else '')
+        thumbnail_token = None
+        for thumbnail in card.find_all('img'):
+            thumbnail_url = image_source(thumbnail, base_url)
+            if not thumbnail_url:
+                continue
+            thumbnail_token = prefix + 'IMAGE' + str(len(images))
+            images.append({'token': thumbnail_token, 'url': thumbnail_url,
+                           'alt': thumbnail.get('alt') or f'{title} 미리보기'})
+            break
+        token = prefix + 'SOURCE' + str(len(sources))
+        sources.append({'token': token, 'kind': 'link_card', 'url': url,
+                        'title': title, 'description': description, 'domain': parts.hostname,
+                        'thumbnail_token': thumbnail_token, 'target': parse_post_url(url)})
+        card.replace_with('\n' + token + '\n')
+
+
 def extract_post(html: str, blog: str, post: str) -> dict:
     soup = BeautifulSoup(html, 'html.parser')
     # A combined CSS selector returns the first element in document order,
@@ -54,6 +101,7 @@ def extract_post(html: str, blog: str, post: str) -> dict:
         element.decompose()
     prefix = 'NBATOKEN' + uuid4().hex.upper()
     sources, images = [], []
+    _extract_link_cards(body, post_url(blog, post), prefix, sources, images)
     # Extract before Markdown conversion; source content is replaced in its original position.
     for section in list(body.select('div.se_sectionArea')):
         a = section.find('a', href=True)

@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from .config import Config
 from .files import archive_lock, atomic_write, inside
@@ -35,6 +36,20 @@ a:focus-visible { outline: 2px solid #258950; outline-offset: 4px; border-radius
 img { display: block; max-width: 100%; height: auto; margin: 22px auto; border-radius: 5px; }
 blockquote { margin: 24px 0; padding: 2px 20px; border-left: 3px solid #a5c7ae;
   background: #f4f8f4; color: #506657; }
+.link-card { max-width: 580px; padding: 0; border: 1px solid #d8e3da; border-radius: 10px;
+  background: #fff; color: #496052; overflow: hidden; box-shadow: 0 2px 8px #24352d08; }
+.link-card > p { margin: 0; }
+.link-card-title { padding: 17px 20px 15px; border-bottom: 1px solid #e8eee9;
+  font-size: 1.05rem; font-weight: 700; line-height: 1.55; background: #f6f9f6; }
+.link-card-title a { text-decoration: none; }
+.link-card-title a:hover { text-decoration: underline; }
+.link-card-thumbnail { padding: 18px 20px 0; }
+.link-card-thumbnail img { max-width: min(100%, 320px); height: auto; margin: 0 auto;
+  object-fit: contain; border-radius: 5px; }
+.link-card-description { padding: 16px 20px; font-size: .93rem; line-height: 1.8; }
+.link-card-footer { padding: 13px 20px; margin-top: 16px !important; background: #f6f9f6;
+  border-top: 1px solid #e8eee9; font-size: .8rem; line-height: 1.75; }
+.link-card-description + .link-card-footer { margin-top: 0 !important; }
 pre { padding: 18px; overflow: auto; background: #f1f4f1; border-radius: 6px; line-height: 1.5; }
 code { background: #f1f4f1; border-radius: 3px; padding: 2px 4px; }
 pre code { padding: 0; }
@@ -80,6 +95,58 @@ def _local_url(root: Path, source: Path, preview: Path, url: str, *, image: bool
     return urlunsplit(('', '', target, parts.query, parts.fragment))
 
 
+def _style_link_cards(tokens: list[Token]) -> None:
+    """Present the archive's Obsidian link callouts without enabling raw HTML."""
+    for index, opening in enumerate(tokens):
+        if opening.type != 'blockquote_open' or index + 3 >= len(tokens):
+            continue
+        first, inline = tokens[index + 1:index + 3]
+        children = inline.children or []
+        if (first.type != 'paragraph_open' or inline.type != 'inline'
+                or len(children) < 4 or children[0].type != 'text'
+                or children[0].content != '[!info] '
+                or children[1].type != 'link_open' or children[-1].type != 'link_close'
+                or sum(child.type == 'link_open' for child in children) != 1):
+            continue
+        closing = next((end for end in range(index + 3, len(tokens))
+                        if tokens[end].type == 'blockquote_close'
+                        and tokens[end].level == opening.level), None)
+        if closing is None:
+            continue
+        title = ''.join(child.content for child in children[2:-1]
+                        if child.type in ('text', 'code_inline')).strip() or '링크 글'
+        inline.children = children[1:]
+        opening.attrJoin('class', 'link-card')
+        opening.attrSet('aria-label', '링크 미리보기: ' + title)
+        paragraphs = [position for position in range(index + 1, closing)
+                      if tokens[position].type == 'paragraph_open'
+                      and tokens[position].level == opening.level + 1]
+        for position in paragraphs:
+            paragraph = tokens[position]
+            content = tokens[position + 1]
+            contents = content.children or []
+            images = [child for child in contents if child.type == 'image']
+            if position == index + 1:
+                kind = 'title'
+            elif images:
+                kind = 'thumbnail'
+            elif position == paragraphs[-1] and any(child.type == 'link_open' for child in contents):
+                kind = 'footer'
+            else:
+                kind = 'description'
+            paragraph.attrJoin('class', 'link-card-' + kind)
+            for image in images:
+                # Obsidian interprets a numeric image label as a display width.
+                # Restrict that convention to cards, and expose a useful alt.
+                if image.content.isascii() and image.content.isdecimal():
+                    width = min(320, max(1, int(image.content))) if len(image.content) < 5 else 320
+                    image.attrSet('width', str(width))
+                    image.content = title + ' 썸네일'
+                    text = Token('text', '', 0)
+                    text.content = image.content
+                    image.children = [text]
+
+
 def create_preview(config: Config, row: dict) -> Path:
     """Render one saved note without changing it or its database record.
 
@@ -99,6 +166,7 @@ def create_preview(config: Config, row: dict) -> Path:
         markdown = source.read_text(encoding='utf-8-sig')
         renderer = MarkdownIt('commonmark', {'html': False}).enable('table')
         tokens = renderer.parse(_body(markdown))
+        _style_link_cards(tokens)
         pending = list(tokens)
         while pending:
             token = pending.pop()

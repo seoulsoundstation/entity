@@ -23,6 +23,10 @@ archive_state.sqlite-*
 .archive.lock
 report.json
 verification.json
+/formatting.json
+/posts/
+/.preview/
+/.note-moves/
 history/
 failed_html/
 

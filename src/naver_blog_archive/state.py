@@ -39,6 +39,9 @@ def document_metadata(document: str | None, fallback_title: str = '') -> dict:
                 continue
             token, value = entry.get('token'), entry.get(label)
             if isinstance(token, str) and token:
+                if name == 'sources' and entry.get('kind') == 'link_card':
+                    value = ' '.join(entry[key] for key in ('title', 'description', 'domain')
+                                     if isinstance(entry.get(key), str) and entry[key])
                 replacements[token] = value if isinstance(value, str) else ''
     if replacements:
         pattern = '|'.join(re.escape(token) for token in sorted(replacements, key=len, reverse=True))

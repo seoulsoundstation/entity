@@ -422,6 +422,8 @@ class ArchiveApp:
         elif 'output_counts' in report:
             output = report['output_counts']
             self.run_summary.set(f'저장 결과 · 제목 파일명 {output.get("renamed", 0):,}개 변경 · Markdown {output.get("updated", 0):,}회 갱신')
+            if output.get('cards'):
+                self.run_summary.set(self.run_summary.get() + f' · 링크 카드 {output["cards"]:,}개 정리')
         self.issues.delete(*self.issues.get_children())
         for item in report.get('failures', []):
             self.issues.insert('', 'end', values=(f'{item["blog_id"]}/{item["post_id"]}', STATUS_NAMES.get(item['status'], item['status']), item.get('error') or '다음 백업에서 다시 처리합니다.'))
