@@ -155,7 +155,7 @@ def test_browser_loads_saved_picture_and_fits_narrow_reading_width(tmp_path):
             page = browser.new_page(viewport={'width': 375, 'height': 850})
             page.goto(preview.as_uri())
             page.locator('article img').scroll_into_view_if_needed()
-            page.wait_for_function('document.querySelector("article img").naturalWidth === 1200')
+            page.wait_for_function('() => document.querySelector("article img").naturalWidth === 1200')
             assert page.locator('article img').evaluate('(image) => image.clientWidth') <= 315
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert page.locator('article h1').inner_text() == '제주 사진'

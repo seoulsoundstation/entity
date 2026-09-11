@@ -125,7 +125,7 @@ def test_browser_loads_card_thumbnail_without_cropping_at_mobile_width(tmp_path)
             page.goto(preview.as_uri())
             image = page.locator('.link-card-thumbnail img')
             image.scroll_into_view_if_needed()
-            page.wait_for_function('document.querySelector(".link-card img").naturalWidth === 1200')
+            page.wait_for_function('() => document.querySelector(".link-card img").naturalWidth === 1200')
             size = image.evaluate('(image) => ({width: image.clientWidth, height: image.clientHeight})')
             assert 0 < size['width'] <= 320
             assert abs(size['width'] / size['height'] - 1.5) < .02

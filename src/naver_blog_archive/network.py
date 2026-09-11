@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import requests
 
 from .config import Config
+from .page_status import page_unavailable_reason
 from .progress import TaskControl
 
 
@@ -168,6 +169,10 @@ class Client:
         return Listing(ids, False, '목록 수집 페이지 상한에 도달했습니다.', total)
 
 
+class PostUnavailableError(RuntimeError):
+    """The page explicitly cannot be read; retrying this request will not help."""
+
+
 class Renderer:
     def __init__(self, config: Config, control: TaskControl | None = None):
         self.config = config
@@ -180,6 +185,48 @@ class Renderer:
         if self.control:
             self.control.check()
 
+    def _emit(self, phase, message, blog, post, attempt, **fields):
+        print(message)
+        if self.control:
+            self.control.emit(phase, message, blog_id=blog, post_id=post,
+                              attempt=attempt, retries=self.config.retries, **fields)
+
+    def _wait_for_body(self, blog, post, attempt, started, deadline):
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+
+        last_notice = started
+        while True:
+            self.check()
+            reason = page_unavailable_reason(self.page.content())
+            if reason:
+                raise PostUnavailableError(reason)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BrowserTimeout(f'본문을 {self.config.timeout}초 안에 불러오지 못했습니다.')
+            try:
+                # Short waits keep cancellation and progress updates responsive
+                # while a page is still loading. All slices share one deadline.
+                self.page.wait_for_function('''({selectors, excluded}) => {
+                    const body = selectors.map(selector => document.querySelector(selector)).find(Boolean);
+                    if (!body) return false;
+                    const content = body.cloneNode(true);
+                    content.querySelectorAll(excluded).forEach(element => element.remove());
+                    return !!(content.textContent.trim() || content.querySelector('img, video, iframe, audio'));
+                }''', arg={'selectors': ARTICLE_BODY_SELECTORS, 'excluded': NON_CONTENT_SELECTOR},
+                    timeout=max(1, min(500, remaining * 1000)))
+                self.check()
+                return self.page.content()
+            except BrowserTimeout:
+                self.check()
+                now = time.monotonic()
+                if now - last_notice >= 5:
+                    elapsed = int(now - started)
+                    self._emit('render_wait',
+                               f'본문 로딩 대기: {blog}/{post} · {elapsed}초 경과 '
+                               f'(시도 {attempt}/{self.config.retries}, 제한 {self.config.timeout}초)',
+                               blog, post, attempt, elapsed=elapsed)
+                    last_notice = now
+
     def render(self, blog: str, post: str) -> str:
         self.check()
         from playwright.sync_api import sync_playwright
@@ -191,31 +238,32 @@ class Renderer:
             self.page = self.browser.new_page()
         for attempt in range(self.config.retries):
             self.check()
+            self._emit('render', f'원문 접속: {blog}/{post} '
+                       f'(시도 {attempt + 1}/{self.config.retries}, 제한 {self.config.timeout}초)',
+                       blog, post, attempt + 1)
+            self.check()
+            started = time.monotonic()
+            deadline = started + self.config.timeout
             try:
                 response = self.page.goto(post_url(blog, post), wait_until='domcontentloaded',
                                           timeout=self.config.timeout * 1000)
                 self.check()
+                if response is not None and response.status in (404, 410):
+                    raise PostUnavailableError(f'글을 제공하지 않는 주소입니다. HTTP {response.status}')
                 if response is None or response.status >= 400:
                     raise RuntimeError(f'글 응답 HTTP {response.status if response else "없음"}')
-                self.page.locator(', '.join(ARTICLE_BODY_SELECTORS)).first.wait_for(
-                    state='attached', timeout=self.config.timeout * 1000)
+                return self._wait_for_body(blog, post, attempt + 1, started, deadline)
+            except PostUnavailableError:
+                raise
+            except Exception as exc:
                 self.check()
-                self.page.wait_for_function('''({selectors, excluded}) => {
-                    // A combined query picks the outer wrapper first and can
-                    // mistake its navigation for an already-loaded article.
-                    const body = selectors.map(selector => document.querySelector(selector)).find(Boolean);
-                    if (!body) return false;
-                    const content = body.cloneNode(true);
-                    content.querySelectorAll(excluded).forEach(element => element.remove());
-                    return !!(content.textContent.trim() || content.querySelector('img, video, iframe, audio'));
-                }''', arg={'selectors': ARTICLE_BODY_SELECTORS, 'excluded': NON_CONTENT_SELECTOR},
-                    timeout=self.config.timeout * 1000)
-                self.check()
-                return self.page.content()
-            except Exception:
                 if attempt + 1 == self.config.retries:
                     raise
                 delay = max(self.config.delay, min(30, 2 ** attempt))
+                detail = str(exc).splitlines()[0][:180] or type(exc).__name__
+                self._emit('render_retry', f'원문 재시도 대기: {blog}/{post} · {detail} · '
+                           f'{delay:g}초 후 시도 {attempt + 2}/{self.config.retries}',
+                           blog, post, attempt + 1, next_attempt=attempt + 2, delay=delay)
                 if self.control:
                     self.control.wait(delay)
                 else:
