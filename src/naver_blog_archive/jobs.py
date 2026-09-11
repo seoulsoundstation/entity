@@ -61,7 +61,8 @@ class JobRunner:
                     message = (f'파일명 {counts["renamed"]:,}개 변경 · Markdown {counts["updated"]:,}회 갱신. '
                                + (f'블로그 메뉴 {counts["navigation_posts"]:,}개 글에서 제거. ' if counts.get('navigation_posts') else '')
                                + (f'링크 카드 {counts["cards"]:,}개 정리. ' if counts.get('cards') else '')
-                               + ('확인할 항목을 확인하세요. 누락된 이미지는 백업 시 재시도합니다.' if status == 'partial'
+                               + (f'첨부 링크 {counts["files"]:,}개 정리. ' if counts.get('files') else '')
+                               + ('확인할 항목을 확인하세요. 누락된 이미지·첨부파일은 백업 시 재시도합니다.' if status == 'partial'
                                   else '사진과 함께 읽기는 저장 글 검색에서 이용하세요.'))
                 else:
                     report = inspect_archive(config, verify=action == 'verify', control=control)

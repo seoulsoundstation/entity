@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 import sqlite3
 
 import pytest
@@ -16,7 +17,8 @@ def test_missing_profiles_are_empty_without_creating_a_file(tmp_path):
 def test_profiles_persist_distinct_blog_settings_and_update_existing_address(tmp_path):
     path = tmp_path / 'blog_profiles.sqlite'
     store = ProfileStore(path)
-    first = Config('first_blog', tmp_path / '첫 보관함', delay=1.2, retries=5, download_images=False)
+    first = Config('first_blog', tmp_path / '첫 보관함', delay=1.2, retries=5, download_images=False,
+                   download_files=False, max_file_mb=250)
     second = Config('second_blog', tmp_path / '다른 보관함', follow_sources=False, source_depth=2)
     store.save(first)
     store.save(second)
@@ -56,3 +58,20 @@ def test_unknown_profile_schema_is_never_overwritten(tmp_path):
     db = sqlite3.connect(path)
     assert db.execute('PRAGMA user_version').fetchone()[0] == 200
     db.close()
+
+
+def test_old_saved_profile_gets_attachment_defaults_without_rewriting_database(tmp_path):
+    path = tmp_path / 'profiles.sqlite'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE profiles (blog_id TEXT PRIMARY KEY, config TEXT NOT NULL)')
+        db.execute('PRAGMA user_version=1')
+        db.execute('INSERT INTO profiles VALUES (?, ?)', ('demo', json.dumps({
+            'blog_id': 'demo', 'out_dir': str(tmp_path / 'archive'), 'download_images': False,
+        })))
+    before = path.read_bytes()
+    profiles = ProfileStore(path).list()
+    assert len(profiles) == 1
+    assert profiles[0].download_files is True
+    assert profiles[0].max_file_mb == 100
+    assert profiles[0].download_images is False
+    assert path.read_bytes() == before

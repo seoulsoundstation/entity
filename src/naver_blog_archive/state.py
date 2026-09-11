@@ -32,7 +32,7 @@ def document_metadata(document: str | None, fallback_title: str = '') -> dict:
     body = data.get('markdown')
     body = body if isinstance(body, str) else ''
     replacements = {}
-    for name, label in (('images', 'alt'), ('sources', 'title')):
+    for name, label in (('images', 'alt'), ('sources', 'title'), ('files', 'name')):
         entries = data.get(name)
         for entry in entries if isinstance(entries, list) else []:
             if not isinstance(entry, dict):

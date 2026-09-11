@@ -10,9 +10,11 @@ import re
 from urllib.parse import quote, urlsplit
 
 from .assets import Assets
+from .attachment_links import attachment_identity, file_links_from_html, upgrade_file_links
 from .cached_cards import upgrade_link_cards
 from .cached_navigation import clean_cached_navigation
 from .config import Config
+from .file_assets import FileAssets
 from .files import archive_lock, atomic_write, digest, inside
 from .network import Client, Renderer, parse_post_url, post_url
 from .note_paths import migrate_note_names, recover_note_moves, titled_path
@@ -48,11 +50,60 @@ def active_rows(config: Config, rows) -> list[dict]:
                   key=lambda row: (row['depth'], row['blog'], row['post']))
 
 
+def file_asset_key(file: dict) -> str:
+    # Naver renews the signature in its download URLs. The resource identity
+    # remains stable, so a new signature must not cause another download.
+    return 'file:' + attachment_identity(file['url'])
+
+
+def active_asset_kinds(config: Config, rows) -> dict[str, str]:
+    result = {}
+    for row in rows:
+        if not active(config, row) or not row['document']:
+            continue
+        document = json.loads(row['document'])
+        if config.download_images:
+            result.update((image['url'], 'image') for image in document['images'])
+        if config.download_files:
+            result.update((file_asset_key(file), 'file') for file in document.get('files', []))
+    return result
+
+
 def active_assets(config: Config, rows) -> set[str]:
-    if not config.download_images:
-        return set()
-    return {image['url'] for row in rows if active(config, row) and row['document']
-            for image in json.loads(row['document'])['images']}
+    return set(active_asset_kinds(config, rows))
+
+
+def refresh_file_urls(config: Config, state: State, client, control: TaskControl, row, document):
+    """Renew only missing attachments' signed links, retaining the cached body."""
+    if not config.download_files:
+        return
+    pending = []
+    for file in document.get('files', []):
+        control.check()
+        if urlsplit(file['url']).hostname != 'download.blog.naver.com':
+            continue
+        asset = state.asset(file_asset_key(file))
+        if asset and asset['status'] == 'success' and asset['path'] and asset['file_hash']:
+            path = inside(config.out_dir, asset['path'])
+            if path.is_file() and digest(path) == asset['file_hash']:
+                continue
+        pending.append(file)
+    if not pending:
+        return
+    control.emit('file', f'첨부파일 주소 확인: {row["blog"]}/{row["post"]}')
+    try:
+        with client.get(post_url(row['blog'], row['post'])) as response:
+            control.check()
+            fresh = file_links_from_html(response.text, row['blog'], row['post'])
+        by_identity = {attachment_identity(file['url']): file for file in fresh}
+        for file in pending:
+            updated = by_identity.get(attachment_identity(file['url']))
+            if updated:
+                file['url'] = updated['url']
+    except Exception as exc:
+        # Preserve the original link if metadata cannot be renewed. The file
+        # downloader will record the actual download failure for this note.
+        control.emit('file', f'첨부파일 주소 확인 실패: {row["blog"]}/{row["post"]} · {exc}')
 
 
 def scan_legacy(config: Config, state: State, control: TaskControl | None = None) -> int:
@@ -102,7 +153,7 @@ def write_note(config: Config, state: State, row, content: bytes):
     return True
 
 
-def format_note(config: Config, state: State, row, download=None):
+def format_note(config: Config, state: State, row, download=None, file_download=None):
     document = json.loads(row['document'])
     replacements, errors, image_targets = {}, [], {}
     relative = row['path'] or titled_path(config, row)
@@ -121,6 +172,24 @@ def format_note(config: Config, state: State, row, download=None):
         target = quote(Path(os.path.relpath(inside(config.out_dir, local), base)).as_posix(), safe='/') if local else image['url']
         replacements[image['token']] = md_link(image['alt'], target, image=True) if target else '[이미지 URL 누락]'
         image_targets[image['token']] = target if local or not config.download_images else None
+    for file in document.get('files', []):
+        local = None
+        if config.download_files:
+            if file_download:
+                local = file_download.obtain(file['url'], post_url(row['blog'], row['post']), file['name'],
+                                             asset_key=file_asset_key(file))
+            else:
+                asset = state.asset(file_asset_key(file))
+                if asset and asset['status'] == 'success' and asset['path'] and inside(config.out_dir, asset['path']).is_file():
+                    local = asset['path']
+            if not local:
+                errors.append('첨부파일 저장 실패: ' + file['name'] + ' · ' + file['url'])
+        target = quote(Path(os.path.relpath(inside(config.out_dir, local), base)).as_posix(), safe='/') if local else file['url']
+        text = md_link('첨부파일: ' + file['name'], target)
+        text += ' · ' + md_link('원문에서 다운로드', post_url(row['blog'], row['post']))
+        if config.download_files and not local:
+            text += ' · 첨부파일 저장 미완료'
+        replacements[file['token']] = text
     for source in document['sources']:
         target = source.get('target')
         href = source['url']
@@ -188,7 +257,8 @@ def upgrade_cached_documents(config: Config, state: State, control: TaskControl)
                 continue
         document, cleaned = clean_cached_navigation(json.loads(row['document']))
         document, upgraded = upgrade_link_cards(document)
-        if cleaned or upgraded:
+        document, files = upgrade_file_links(document)
+        if cleaned or upgraded or files:
             state.update(row['blog'], row['post'], document=json.dumps(document, ensure_ascii=False),
                          status='partial', content_ok=0, error='저장 본문 정리 필요')
             if cleaned:
@@ -197,6 +267,9 @@ def upgrade_cached_documents(config: Config, state: State, control: TaskControl)
             if upgraded:
                 counts['cards'] = counts.get('cards', 0) + upgraded
                 control.emit('formatting', f'링크 미리보기 {upgraded}개 정리: {row["blog"]}/{row["post"]}')
+            if files:
+                counts['files'] = counts.get('files', 0) + files
+                control.emit('formatting', f'첨부 링크 {files}개 확인: {row["blog"]}/{row["post"]}')
     return counts
 
 
@@ -204,7 +277,9 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
     control = control or TaskControl()
     problems = []
     rows = active_rows(config, state.posts())
-    needed_assets = active_assets(config, rows)
+    needed_assets = active_asset_kinds(config, rows)
+    file_names = {file_asset_key(file): file['name'] for row in rows if row['document']
+                  for file in json.loads(row['document']).get('files', [])}
     for asset in state.db.execute('SELECT * FROM assets').fetchall():
         control.check()
         if asset['url'] not in needed_assets:
@@ -217,7 +292,8 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
         except (OSError, ValueError):
             good = False
         if not good:
-            message = '이미지 파일 누락 또는 변경: ' + asset['url']
+            label = '첨부파일' if needed_assets[asset['url']] == 'file' else '이미지 파일'
+            message = label + ' 누락 또는 변경: ' + file_names.get(asset['url'], asset['url'])
             # Retain the expected location/hash so restoring the file can pass
             # a later offline verification without another download.
             state.save_asset(asset['url'], asset['path'], asset['file_hash'], 'failed', message)
@@ -251,6 +327,12 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
                 if not asset or asset['status'] != 'success':
                     errors.append('이미지 미완료: ' + image['url'])
                     content_ok = 0
+        if row['document'] and config.download_files:
+            for file in json.loads(row['document']).get('files', []):
+                asset = state.asset(file_asset_key(file))
+                if not asset or asset['status'] != 'success':
+                    errors.append('첨부파일 미완료: ' + file['name'])
+                    content_ok = 0
         if errors:
             state.update(row['blog'], row['post'], status='partial' if row['document'] else 'pending',
                          content_ok=content_ok, error='; '.join(errors))
@@ -274,7 +356,18 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
 def make_report(config: Config, state: State) -> dict:
     all_rows = state.posts()
     rows = active_rows(config, all_rows)
-    needed_assets = active_assets(config, rows)
+    needed_assets = active_asset_kinds(config, rows)
+    file_details = {file_asset_key(file): file for row in rows if row['document']
+                    for file in json.loads(row['document']).get('files', [])}
+    asset_errors = []
+    for asset in state.db.execute("SELECT url,status,error FROM assets WHERE status != 'success'"):
+        if asset['url'] not in needed_assets:
+            continue
+        detail = dict(asset)
+        if needed_assets[asset['url']] == 'file':
+            file = file_details[asset['url']]
+            detail.update(kind='file', name=file['name'], url=file['url'])
+        asset_errors.append(detail)
     counts = {}
     for row in rows:
         counts[row['status']] = counts.get(row['status'], 0) + 1
@@ -283,7 +376,7 @@ def make_report(config: Config, state: State) -> dict:
             'last_run': dict(latest) if latest else None, 'posts': counts,
             'failures': [{'blog_id': r['blog'], 'post_id': r['post'], 'status': r['status'], 'error': r['error']}
                          for r in rows if r['status'] != 'success'],
-            'assets': [dict(r) for r in state.db.execute("SELECT url,status,error FROM assets WHERE status != 'success'") if r['url'] in needed_assets]}
+            'assets': asset_errors}
 
 
 def discover_sources(config: Config, state: State, client, control: TaskControl, row, document):
@@ -362,6 +455,7 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
             control.emit('listing', message, listed=len(listing.ids), total=listing.total,
                          complete=listing.complete)
             assets = Assets(config, state, client, control=control)
+            file_assets = FileAssets(config, state, client, control=control)
             while True:
                 control.check()
                 current_rows = active_rows(config, state.posts())
@@ -400,20 +494,23 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                                      run_counts=dict(run_counts))
                         control.check()
                         state.update(*key, status='running', attempts=row['attempts'] + 1)
-                        if refresh or not row['document']:
+                        fetched = refresh or not row['document']
+                        if fetched:
                             if refresh:
                                 state.update(*key, document=None, content_ok=0)
                             document = extract_post(renderer.render(*key), *key)
                             control.check()
                             state.update(*key, document=json.dumps(document, ensure_ascii=False), content_ok=0)
                             control.wait(config.delay)
+                        if not fetched:
+                            refresh_file_urls(config, state, client, control, row, document)
                         discover_sources(config, state, client, control, row, document)
                         state.update(*key, document=json.dumps(document, ensure_ascii=False))
                         row = dict(state.get(*key), depth=row['depth'])
-                        content, errors = format_note(config, state, row, assets)
+                        content, errors = format_note(config, state, row, assets, file_assets)
                         control.check()
                         write_note(config, state, row, content)
-                        own_errors = [e for e in errors if e.startswith('이미지')]
+                        own_errors = [e for e in errors if e.startswith(('이미지', '첨부파일'))]
                         state.update(*key, content_ok=not own_errors, status='partial' if errors else 'success', error='; '.join(errors))
                         title = document['title']
                         message = f'{"부분 성공" if errors else "저장 확인"}: {key[0]}/{key[1]} {title[:50]}'
@@ -534,7 +631,7 @@ def reformat_archive(config: Config, *, control: TaskControl | None = None) -> d
                 try:
                     content, errors = format_note(config, state, row)
                     updated += bool(write_note(config, state, row, content))
-                    state.update(row['blog'], row['post'], content_ok=not any(e.startswith('이미지') for e in errors),
+                    state.update(row['blog'], row['post'], content_ok=not any(e.startswith(('이미지', '첨부파일')) for e in errors),
                                  status='partial' if errors else 'success', error='; '.join(errors))
                 except Exception as exc:
                     state.update(row['blog'], row['post'], status='partial', content_ok=0, error=str(exc))

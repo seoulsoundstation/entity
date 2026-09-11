@@ -2,6 +2,8 @@ blog_id = "tmdejr1267"
 out_dir = "naver_blog_backup"
 delay = 0.5
 download_images = true
+# PDF·Excel·ZIP 등 글에 첨부된 파일도 저장합니다. 이미지 저장과 별도 설정입니다.
+download_files = true
 follow_sources = true
 
 # 상대 out_dir는 이 설정 파일 위치를 기준으로 해석합니다.
@@ -11,4 +13,6 @@ source_depth = 1
 retries = 3
 timeout = 30
 max_image_mb = 30
+# 첨부파일 하나당 최대 크기 (MiB, 1~2048). 정상 저장된 파일은 다시 사용합니다.
+max_file_mb = 100
 max_pages = 10000

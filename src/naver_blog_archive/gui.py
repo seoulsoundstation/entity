@@ -59,10 +59,11 @@ class ArchiveApp:
         self.blog = tk.StringVar()
         self.folder = tk.StringVar(value=str(self.config_path.parent / 'naver_blog_backup'))
         self.images = tk.BooleanVar(value=True)
+        self.files = tk.BooleanVar(value=True)
         self.sources = tk.BooleanVar(value=True)
         self.refresh = tk.BooleanVar(value=False)
         self.phase = tk.StringVar(value='백업할 블로그를 입력해 주세요')
-        self.detail = tk.StringVar(value='공개 글 전체를 Markdown으로 저장합니다. 이미지와 인용 원본도 함께 보관할 수 있습니다.')
+        self.detail = tk.StringVar(value='공개 글 전체를 Markdown으로 저장합니다. 이미지·첨부파일·인용 원본도 함께 보관할 수 있습니다.')
         self.settings_note = tk.StringVar()
         self.run_summary = tk.StringVar(value='기본 백업: 기존 파일 확인 후 건너뛰기 · 새 글과 미완료 항목 저장')
         self.counts = {key: tk.StringVar(value='0') for key in ('success', 'partial', 'failed', 'pending')}
@@ -150,10 +151,11 @@ class ArchiveApp:
         self._input_widgets.append(choose)
         options = ttk.Frame(settings, style='Card.TFrame')
         options.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(7, 0))
-        for column, (label, variable) in enumerate([('이미지 저장', self.images), ('인용 원본 저장', self.sources), ('기존 글도 최신 내용으로 갱신', self.refresh)]):
+        for index, (label, variable) in enumerate([
+                ('이미지 저장', self.images), ('첨부파일 저장', self.files),
+                ('인용 원본 저장', self.sources), ('기존 글도 최신 내용으로 갱신', self.refresh)]):
             widget = ttk.Checkbutton(options, text=label, variable=variable, style=self.control_styles.checkbutton)
-            widget.grid(row=0 if column < 2 else 1, column=column if column < 2 else 0,
-                        columnspan=1 if column < 2 else 2, sticky='w', padx=(0, 14))
+            widget.grid(row=index // 2, column=index % 2, sticky='w', padx=(0, 14))
             self._input_widgets.append(widget)
         setting_actions = ttk.Frame(settings, style='Card.TFrame')
         setting_actions.grid(row=6, column=0, columnspan=3, sticky='ew', pady=(7, 0))
@@ -212,7 +214,7 @@ class ArchiveApp:
         issues.rowconfigure(0, weight=1)
         issues.columnconfigure(0, weight=1)
         self.issues = ttk.Treeview(issues, columns=('item', 'status', 'error'), show='headings', height=6)
-        for key, label, width in [('item', '글 / 이미지', 240), ('status', '상태', 90), ('error', '내용 · 더블클릭하면 전체 보기', 570)]:
+        for key, label, width in [('item', '글 / 이미지 / 첨부파일', 240), ('status', '상태', 90), ('error', '내용 · 더블클릭하면 전체 보기', 570)]:
             self.issues.heading(key, text=label)
             self.issues.column(key, width=width, minwidth=70, stretch=key == 'error')
         self.issues.grid(row=0, column=0, sticky='nsew')
@@ -234,6 +236,7 @@ class ArchiveApp:
         self.blog.set(config.blog_id)
         self.folder.set(str(config.out_dir))
         self.images.set(config.download_images)
+        self.files.set(config.download_files)
         self.sources.set(config.follow_sources)
 
     def _reload_profiles(self):
@@ -284,7 +287,8 @@ class ArchiveApp:
     def read_config(self):
         values = dict(self._advanced)
         values.update(blog_id=normalize_blog_id(self.blog.get()), out_dir=self.folder.get().strip(),
-                      download_images=self.images.get(), follow_sources=self.sources.get())
+                      download_images=self.images.get(), follow_sources=self.sources.get(),
+                      download_files=self.files.get())
         return config_from_mapping(values, base_dir=self.config_path.parent)
 
     def choose_folder(self):
@@ -327,7 +331,9 @@ class ArchiveApp:
         fields = {}
         specs = [('delay', '요청 간격 (초, 0 이상)', float), ('timeout', '요청 제한 시간 (초, 0 초과)', float),
                  ('retries', '최대 시도 횟수 (1~10)', int), ('source_depth', '인용 원본 추적 깊이 (0~3)', int),
-                 ('max_image_mb', '이미지 최대 크기 (MiB, 1~500)', int), ('max_pages', '목록 페이지 상한 (1~100000)', int)]
+                 ('max_image_mb', '이미지 최대 크기 (MiB, 1~500)', int),
+                 ('max_file_mb', '첨부파일 최대 크기 (MiB, 1~2048)', int),
+                 ('max_pages', '목록 페이지 상한 (1~100000)', int)]
         for row, (key, label, converter) in enumerate(specs, 1):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky='w', padx=(0, 24), pady=6)
             fields[key] = tk.StringVar(value=str(self._advanced[key]))
@@ -348,7 +354,8 @@ class ArchiveApp:
             except ValueError as exc:
                 messagebox.showerror('세부 설정 오류', str(exc), parent=dialog)
 
-        ttk.Button(form, text='적용', style='Primary.TButton', command=apply).grid(row=7, column=1, sticky='e', pady=(16, 0))
+        ttk.Button(form, text='적용', style='Primary.TButton', command=apply).grid(
+            row=len(specs) + 1, column=1, sticky='e', pady=(16, 0))
         dialog.grab_set()
 
     def _set_busy(self, busy):
@@ -424,11 +431,14 @@ class ArchiveApp:
             self.run_summary.set(f'저장 결과 · 제목 파일명 {output.get("renamed", 0):,}개 변경 · Markdown {output.get("updated", 0):,}회 갱신')
             if output.get('cards'):
                 self.run_summary.set(self.run_summary.get() + f' · 링크 카드 {output["cards"]:,}개 정리')
+            if output.get('files'):
+                self.run_summary.set(self.run_summary.get() + f' · 첨부 링크 {output["files"]:,}개 정리')
         self.issues.delete(*self.issues.get_children())
         for item in report.get('failures', []):
             self.issues.insert('', 'end', values=(f'{item["blog_id"]}/{item["post_id"]}', STATUS_NAMES.get(item['status'], item['status']), item.get('error') or '다음 백업에서 다시 처리합니다.'))
         for item in report.get('assets', []):
-            self.issues.insert('', 'end', values=(item['url'], '이미지', item.get('error', '이미지 저장 미완료')))
+            kind = '첨부파일' if item.get('kind') == 'file' else '이미지'
+            self.issues.insert('', 'end', values=(item['url'], kind, item.get('error') or f'{kind} 저장 미완료'))
         for problem in report.get('verification_problems', []):
             self.issues.insert('', 'end', values=('저장 파일 검사', '확인 필요', problem))
         for problem in report.get('output_problems', []):

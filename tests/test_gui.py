@@ -52,12 +52,15 @@ def set_valid_inputs(app):
 def test_form_normalizes_url_and_preserves_advanced_settings_and_options(app):
     set_valid_inputs(app)
     app.images.set(False)
+    app.files.set(False)
     app.sources.set(False)
-    app._advanced.update(delay=1.5, retries=7, source_depth=2, max_pages=321)
+    app._advanced.update(delay=1.5, retries=7, source_depth=2, max_pages=321, max_file_mb=250)
     config = app.read_config()
     assert config.blog_id == 'demo_blog'
     assert config.out_dir == app.config_path.parent / '저장 폴더'
     assert not config.download_images
+    assert not config.download_files
+    assert config.max_file_mb == 250
     assert not config.follow_sources
     assert (config.delay, config.retries, config.source_depth, config.max_pages) == (1.5, 7, 2, 321)
 
@@ -228,7 +231,8 @@ def test_report_exposes_post_asset_verification_and_listing_failures(app):
 
 def test_load_settings_switches_active_file_and_save_uses_that_location(app, tmp_path, monkeypatch):
     target = tmp_path / 'settings' / '다른 설정.toml'
-    expected = Config('another_blog', tmp_path / '보관함', delay=2, download_images=False)
+    expected = Config('another_blog', tmp_path / '보관함', delay=2, download_images=False,
+                      download_files=False, max_file_mb=250)
     save_config(expected, target)
     monkeypatch.setattr(gui.filedialog, 'askopenfilename', lambda **kwargs: str(target))
     app.load_settings()
@@ -303,8 +307,9 @@ def test_start_and_failure_report_preserve_users_selected_tab(app, monkeypatch, 
 def test_profile_saves_and_restores_each_blogs_folder_and_options(app, tmp_path):
     set_valid_inputs(app)
     app.images.set(False)
+    app.files.set(False)
     app.sources.set(False)
-    app._advanced.update(delay=2.5, retries=6)
+    app._advanced.update(delay=2.5, retries=6, max_file_mb=2048)
     app.refresh.set(True)
     expected = app.read_config()
     app.save_profile()
@@ -314,6 +319,7 @@ def test_profile_saves_and_restores_each_blogs_folder_and_options(app, tmp_path)
     app.blog.set('another_blog')
     app.folder.set(str(tmp_path / 'another'))
     app.images.set(True)
+    app.files.set(True)
     app.sources.set(True)
     app.save_profile()
     assert set(app.profile_box['values']) == {'demo_blog', 'another_blog'}
@@ -385,3 +391,69 @@ def test_run_summary_distinguishes_new_saves_from_reused_archive_files(app):
     app._show_report({'posts': {'success': 1253}, 'run_counts': {'saved': 3, 'reused': 1250, 'failed': 0}})
     assert app.counts['success'].get() == '1253'
     assert app.run_summary.get() == '이번 실행 · 저장/복구 3개 · 기존 파일 건너뜀 1,250개 · 확인 필요 0개'
+
+
+def test_attachment_checkbox_is_enabled_by_default_and_independent_of_images(app):
+    set_valid_inputs(app)
+    assert app.files.get() is True
+    checkboxes = {widget['text']: widget for widget in app._input_widgets
+                  if isinstance(widget, gui.ttk.Checkbutton)}
+    assert len(checkboxes) == 4
+    checkboxes['이미지 저장'].invoke()
+    assert app.read_config().download_images is False
+    assert app.read_config().download_files is True
+    checkboxes['첨부파일 저장'].invoke()
+    assert app.read_config().download_files is False
+    assert app.sources.get() is True
+    assert app.refresh.get() is False
+    positions = {(widget.grid_info()['row'], widget.grid_info()['column'])
+                 for widget in checkboxes.values()}
+    assert positions == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+
+def test_advanced_attachment_limit_validates_and_apply_does_not_cover_fields(app, monkeypatch):
+    create_dialog = gui.tk.Toplevel
+
+    def hidden_dialog(*args, **kwargs):
+        dialog = create_dialog(*args, **kwargs)
+        dialog.withdraw()
+        return dialog
+
+    monkeypatch.setattr(gui.tk, 'Toplevel', hidden_dialog)
+    app.advanced_settings()
+    dialog = next(child for child in app.root.winfo_children() if isinstance(child, create_dialog))
+    form = dialog.winfo_children()[0]
+    file_label = next(child for child in form.winfo_children()
+                      if isinstance(child, gui.ttk.Label) and child['text'].startswith('첨부파일 최대 크기'))
+    row = file_label.grid_info()['row']
+    entry = form.grid_slaves(row=row, column=1)[0]
+    apply_button = next(child for child in form.winfo_children() if isinstance(child, gui.ttk.Button))
+    last_entry_row = max(child.grid_info()['row'] for child in form.winfo_children()
+                         if isinstance(child, gui.ttk.Entry))
+    assert apply_button.grid_info()['row'] > last_entry_row
+    entry.delete(0, 'end')
+    entry.insert(0, '2049')
+    apply_button.invoke()
+    assert app.test_dialogs[-1][0] == '세부 설정 오류'
+    assert app._advanced['max_file_mb'] == 100
+    assert dialog.winfo_exists()
+    entry.delete(0, 'end')
+    entry.insert(0, '2048')
+    apply_button.invoke()
+    assert app._advanced['max_file_mb'] == 2048
+    assert not dialog.winfo_exists()
+
+
+def test_report_distinguishes_attachment_failures_and_cached_link_updates(app):
+    app._show_report({
+        'assets': [
+            {'url': 'https://example.test/photo.jpg', 'error': 'image timeout'},
+            {'url': 'https://example.test/report.pdf', 'kind': 'file', 'error': None},
+        ],
+        'output_counts': {'renamed': 0, 'updated': 1, 'cards': 2, 'files': 3},
+    })
+    rows = [app.issues.item(item, 'values') for item in app.issues.get_children()]
+    assert rows[0][1:] == ('이미지', 'image timeout')
+    assert rows[1][1:] == ('첨부파일', '첨부파일 저장 미완료')
+    assert '링크 카드 2개 정리' in app.run_summary.get()
+    assert '첨부 링크 3개 정리' in app.run_summary.get()

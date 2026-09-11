@@ -29,6 +29,8 @@ class Config:
     timeout: float = 30
     max_image_mb: int = 30
     max_pages: int = 10000
+    download_files: bool = True
+    max_file_mb: int = 100
 
 
 def normalize_blog_id(value: str) -> str:
@@ -80,11 +82,12 @@ def config_from_mapping(data: Mapping[str, object], base_dir: str | Path | None 
     out_path = Path(out).expanduser()
     base = Path(base_dir).expanduser() if base_dir is not None else Path.cwd()
     data['out_dir'] = (base / out_path).resolve()
-    for key in ('download_images', 'follow_sources'):
+    for key in ('download_images', 'follow_sources', 'download_files'):
         if key in data and type(data[key]) is not bool:
             raise ValueError(f'{key}는 true 또는 false여야 합니다.')
     for key, low, high in (('source_depth', 0, 3), ('retries', 1, 10),
-                           ('max_image_mb', 1, 500), ('max_pages', 1, 100000)):
+                           ('max_image_mb', 1, 500), ('max_pages', 1, 100000),
+                           ('max_file_mb', 1, 2048)):
         value = data.get(key, Config.__dataclass_fields__[key].default)
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f'{key}는 {low}~{high} 범위의 정수여야 합니다.')

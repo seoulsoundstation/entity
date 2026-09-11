@@ -9,6 +9,7 @@ from uuid import uuid4
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
+from .attachment_links import extract_file_links
 from .network import ARTICLE_BODY_SELECTORS, NON_CONTENT_SELECTOR, parse_post_url, post_url
 
 
@@ -104,6 +105,7 @@ def extract_post(html: str, blog: str, post: str) -> dict:
             element.decompose()
     prefix = 'NBATOKEN' + uuid4().hex.upper()
     sources, images = [], []
+    files = extract_file_links(body, post_url(blog, post), prefix)
     _extract_link_cards(body, post_url(blog, post), prefix, sources, images)
     # Extract before Markdown conversion; source content is replaced in its original position.
     for section in list(body.select('div.se_sectionArea')):
@@ -143,7 +145,7 @@ def extract_post(html: str, blog: str, post: str) -> dict:
     if not markdown:
         raise ValueError('Markdown 변환 결과가 비어 있습니다.')
     return {'title': title, 'blog_id': blog, 'post_id': post, 'markdown': markdown,
-            'images': images, 'sources': sources, 'published_at': published_at,
+            'images': images, 'sources': sources, 'files': files, 'published_at': published_at,
             'archived_at': datetime.now(timezone.utc).isoformat()}
 
 
