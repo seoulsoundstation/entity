@@ -32,6 +32,19 @@ def image_source(img, base_url: str) -> str:
                 return candidate
         except ValueError:
             continue
+    # Authorized Premium pages initially use a transparent placeholder. The
+    # SmartEditor image link carries the URL that its normal viewer loads.
+    anchor = img.find_parent('a', attrs={'data-linktype': 'img'})
+    if anchor is not None and len(anchor.find_all('img')) == 1:
+        try:
+            data = json.loads(anchor.get('data-linkdata') or '{}')
+            value = data.get('src') if isinstance(data, dict) else None
+            if isinstance(value, str) and value.strip():
+                candidate = urljoin(base_url, value.strip())
+                if urlsplit(candidate).scheme in ('http', 'https'):
+                    return candidate
+        except (ValueError, TypeError):
+            pass
     return ''
 
 
@@ -122,6 +135,11 @@ def extract_post(html: str, blog: str, post: str) -> dict:
     # would discard its siblings and then try to replace a detached element.
     for anchor in list(body.find_all('a')):
         if anchor.find('img') and not anchor.get_text(strip=True):
+            # Preserve image-link metadata before removing its wrapper.
+            for photo in anchor.find_all('img'):
+                source = image_source(photo, post_url(blog, post))
+                if source:
+                    photo['data-lazy-src'] = source
             anchor.unwrap()
     for img in list(body.find_all('img')):
         src = image_source(img, post_url(blog, post))

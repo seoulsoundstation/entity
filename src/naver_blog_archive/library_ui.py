@@ -23,7 +23,7 @@ class LibraryPane(ttk.Frame):
         super().__init__(parent, style='Card.TFrame', padding=10)
         self.config_provider = config_provider
         self.query = tk.StringVar()
-        self.summary = tk.StringVar(value='설정한 블로그의 저장 글을 ID·제목·본문으로 검색합니다.')
+        self.summary = tk.StringVar(value='설정한 블로그·채널의 저장 글을 ID·제목·본문으로 검색합니다.')
         self.page_note = tk.StringVar(value='0개')
         self.offset = 0
         self.limit = 50
@@ -55,7 +55,7 @@ class LibraryPane(ttk.Frame):
         table.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(table, columns=('id', 'title', 'blog', 'status'), show='headings', height=6,
                                 selectmode='browse')
-        for key, label, width in [('id', '보관 ID', 295), ('title', '제목', 350), ('blog', '블로그 ID', 130), ('status', '상태', 85)]:
+        for key, label, width in [('id', '보관 ID', 295), ('title', '제목', 350), ('blog', '블로그 / 채널', 150), ('status', '상태', 85)]:
             self.tree.heading(key, text=label)
             self.tree.column(key, width=width, minwidth=70, stretch=key == 'title')
         self.tree.grid(row=0, column=0, sticky='nsew')
@@ -192,7 +192,7 @@ class LibraryPane(ttk.Frame):
         if not row:
             return
         details = (f'{row["title"] or row["post_id"]}\n\n보관 ID: {row["archive_id"]}'
-                   f'\n네이버 글 번호: {row["post_id"]}\n블로그: {row["blog_id"]}'
+                   f'\n네이버 글 ID: {row["post_id"]}\n블로그 / 채널: {row["blog_id"]}'
                    f'\n작성일: {row.get("published_at") or "원문 정보 없음"}'
                    f'\n보관일: {row.get("archived_at") or "기록 없음"}'
                    f'\n상태: {LABELS.get(row["status"], row["status"])}'

@@ -44,6 +44,39 @@ def test_normalize_rejects_unsupported_or_ambiguous_addresses(value):
         normalize_blog_id(value)
 
 
+@pytest.mark.parametrize('value', [
+    'https://contents.premium.naver.com/salarymoney/moneystock',
+    'https://contents.premium.naver.com/salarymoney/moneystock/',
+    'contents.premium.naver.com/salarymoney/moneystock',
+    'premium/salarymoney/moneystock',
+])
+def test_normalize_premium_channel_address(value):
+    assert normalize_blog_id(value) == 'premium/salarymoney/moneystock'
+
+
+@pytest.mark.parametrize('key', [
+    'premium/salarymoney', 'premium/salarymoney/moneystock/extra',
+    'premium/../moneystock', 'premium/salarymoney/..',
+    'premium/salarymoney/money:stock', 'premium/salarymoney/money\\stock',
+    'premium/salarymoney%2Fother/moneystock',
+    'https://contents.premium.naver.com/salarymoney/moneystock',
+])
+def test_config_rejects_invalid_premium_storage_keys(key, tmp_path):
+    with pytest.raises(ValueError):
+        config_from_mapping({'blog_id': key}, base_dir=tmp_path)
+
+
+def test_premium_channel_config_roundtrip_preserves_existing_options(tmp_path):
+    config = config_from_mapping({
+        'blog_id': 'premium/salarymoney/moneystock', 'out_dir': '내 구독 보관함',
+        'download_images': False, 'download_files': True, 'max_file_mb': 250,
+    }, base_dir=tmp_path)
+    path = tmp_path / 'premium.toml'
+    save_config(config, path)
+    assert load_config(path) == config
+    assert config.blog_id == 'premium/salarymoney/moneystock'
+
+
 def test_mapping_is_not_mutated_and_resolves_relative_directory(tmp_path):
     data = {'blog_id': 'demo', 'out_dir': '../results'}
     config = config_from_mapping(data, base_dir=tmp_path / 'settings')

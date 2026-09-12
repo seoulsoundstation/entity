@@ -13,6 +13,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from .addresses import channel_url, is_premium
 from .config import Config, config_from_mapping, load_config, normalize_blog_id, save_config
 from .jobs import JobRunner
 from .library_ui import LibraryPane
@@ -26,7 +27,12 @@ MUTED = '#61748a'
 GREEN = '#087f62'
 STATUS_NAMES = {'success': '완료', 'partial': '부분 완료', 'failed': '실패',
                 'pending': '대기', 'running': '진행 중', 'interrupted': '중단', 'error': '오류'}
-ACTION_NAMES = {'backup': '백업', 'verify': '파일 검사', 'status': '상태 확인', 'doctor': '환경 진단', 'reformat': '저장 결과 정리'}
+ACTION_NAMES = {'backup': '백업', 'verify': '파일 검사', 'status': '상태 확인', 'doctor': '환경 진단',
+                'reformat': '저장 결과 정리', 'login': '네이버 로그인'}
+
+
+def _source_label(blog_id: str) -> str:
+    return channel_url(blog_id) if is_premium(blog_id) else blog_id
 
 
 def open_folder(path: Path):
@@ -62,8 +68,9 @@ class ArchiveApp:
         self.files = tk.BooleanVar(value=True)
         self.sources = tk.BooleanVar(value=True)
         self.refresh = tk.BooleanVar(value=False)
-        self.phase = tk.StringVar(value='백업할 블로그를 입력해 주세요')
-        self.detail = tk.StringVar(value='공개 글 전체를 Markdown으로 저장합니다. 이미지·첨부파일·인용 원본도 함께 보관할 수 있습니다.')
+        self.login_note = tk.StringVar()
+        self.phase = tk.StringVar(value='백업할 블로그 또는 채널을 입력해 주세요')
+        self.detail = tk.StringVar(value='공개 블로그와 구독 중인 프리미엄 채널을 Markdown으로 저장합니다. 이미지·첨부파일도 함께 보관할 수 있습니다.')
         self.settings_note = tk.StringVar()
         self.run_summary = tk.StringVar(value='기본 백업: 기존 파일 확인 후 건너뛰기 · 새 글과 미완료 항목 저장')
         self.counts = {key: tk.StringVar(value='0') for key in ('success', 'partial', 'failed', 'pending')}
@@ -78,11 +85,13 @@ class ArchiveApp:
                 self._log(f'설정 불러오기 실패: {exc}')
         self._update_settings_note()
         self._reload_profiles()
+        self.blog.trace_add('write', self._update_login_button)
+        self._update_login_button()
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
         self.root.after(120, self._poll)
 
     def _build(self):
-        self.root.title('네이버 블로그 보관함')
+        self.root.title('네이버 콘텐츠 보관함')
         width = min(1120, self.root.winfo_screenwidth() - 60)
         height = min(860, self.root.winfo_screenheight() - 100)
         self.root.geometry(f'{width}x{height}+{max(0, (self.root.winfo_screenwidth() - width) // 2)}+30')
@@ -121,7 +130,7 @@ class ArchiveApp:
         shell.rowconfigure(3, weight=1)
         header = ttk.Frame(shell)
         header.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 12))
-        ttk.Label(header, text='네이버 블로그 보관함', font=('맑은 고딕', 23, 'bold')).pack(side='left')
+        ttk.Label(header, text='네이버 콘텐츠 보관함', font=('맑은 고딕', 23, 'bold')).pack(side='left')
         ttk.Label(header, text='내 PC에 차곡차곡', style='Muted.TLabel').pack(side='right', pady=(14, 0))
 
         settings = ttk.Frame(shell, style='Card.TFrame', padding=14)
@@ -129,18 +138,18 @@ class ArchiveApp:
         settings.columnconfigure(1, weight=1)
         ttk.Label(settings, text='01  백업 설정', style='Card.TLabel', font=('맑은 고딕', 12, 'bold')).grid(
             row=0, column=0, columnspan=3, sticky='w', pady=(0, 12))
-        ttk.Label(settings, text='저장한 블로그', style='Card.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 16))
+        ttk.Label(settings, text='저장한 주소', style='Card.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 16))
         self.profile_box = ttk.Combobox(settings, textvariable=self.profile_choice, state='readonly')
         self.profile_box.grid(row=1, column=1, sticky='ew', padx=(0, 8), pady=(0, 7))
         self.profile_box.bind('<<ComboboxSelected>>', self.select_profile)
-        self.profile_button = ttk.Button(settings, text='현재 블로그 저장', command=self.save_profile)
+        self.profile_button = ttk.Button(settings, text='현재 주소 저장', command=self.save_profile)
         self.profile_button.grid(row=1, column=2, sticky='ew', pady=(0, 7))
         self._input_widgets.append(self.profile_button)
-        ttk.Label(settings, text='블로그 주소 / ID', style='Card.TLabel').grid(row=2, column=0, sticky='w', padx=(0, 16))
+        ttk.Label(settings, text='블로그 / 채널 주소', style='Card.TLabel').grid(row=2, column=0, sticky='w', padx=(0, 16))
         self.blog_entry = ttk.Entry(settings, textvariable=self.blog)
         self.blog_entry.grid(row=2, column=1, columnspan=2, sticky='ew', pady=4)
         self._input_widgets.append(self.blog_entry)
-        ttk.Label(settings, text='예: https://blog.naver.com/myblog 또는 myblog', style='CardMuted.TLabel').grid(
+        ttk.Label(settings, text='블로그 ID 또는 네이버 프리미엄 채널 주소', style='CardMuted.TLabel').grid(
             row=3, column=1, columnspan=2, sticky='w', pady=(0, 7))
         ttk.Label(settings, text='저장 폴더', style='Card.TLabel').grid(row=4, column=0, sticky='w')
         folder_entry = ttk.Entry(settings, textvariable=self.folder)
@@ -163,7 +172,9 @@ class ArchiveApp:
             button = ttk.Button(setting_actions, text=label, command=command)
             button.pack(side='left', padx=(0, 6))
             self._input_widgets.append(button)
-        ttk.Label(settings, text='백업 시작 시 블로그별 주소·폴더·옵션을 저장합니다.', style='CardMuted.TLabel').grid(
+        self.login_button = ttk.Button(setting_actions, text='네이버 로그인', command=lambda: self.start('login'), state='disabled')
+        self.login_button.pack(side='left')
+        ttk.Label(settings, textvariable=self.login_note, style='CardMuted.TLabel', wraplength=430).grid(
             row=7, column=0, columnspan=3, sticky='w', pady=(9, 0))
 
         actions = ttk.Frame(shell)
@@ -229,11 +240,20 @@ class ArchiveApp:
         ttk.Label(shell, textvariable=self.settings_note, style='Muted.TLabel', wraplength=1040).grid(row=4, column=0, columnspan=2, sticky='w', pady=(10, 0))
 
     def _update_settings_note(self):
-        self.settings_note.set(f'설정: {self.config_path}  ·  블로그마다 별도 저장 폴더를 사용해 주세요.')
+        self.settings_note.set(f'설정: {self.config_path}  ·  블로그·채널마다 별도 저장 폴더를 사용해 주세요.')
+
+    def _update_login_button(self, *_args):
+        try:
+            premium = is_premium(normalize_blog_id(self.blog.get()))
+        except ValueError:
+            premium = False
+        self.login_button.configure(state='normal' if premium and not self.running else 'disabled')
+        self.login_note.set('전용 브라우저에서 구독 계정으로 로그인한 뒤 백업하세요.' if premium
+                            else '블로그·채널별 폴더·옵션은 백업 시작 시 저장합니다.')
 
     def _apply_config(self, config):
         self._advanced = asdict(config)
-        self.blog.set(config.blog_id)
+        self.blog.set(_source_label(config.blog_id))
         self.folder.set(str(config.out_dir))
         self.images.set(config.download_images)
         self.files.set(config.download_files)
@@ -241,10 +261,10 @@ class ArchiveApp:
 
     def _reload_profiles(self):
         try:
-            self.saved_profiles = {config.blog_id: config for config in self.profile_store.list()}
+            self.saved_profiles = {_source_label(config.blog_id): config for config in self.profile_store.list()}
             self.profile_box.configure(values=list(self.saved_profiles))
             try:
-                current_blog = normalize_blog_id(self.blog.get())
+                current_blog = _source_label(normalize_blog_id(self.blog.get()))
             except ValueError:
                 current_blog = ''
             self.profile_choice.set(current_blog if current_blog in self.saved_profiles else '')
@@ -256,8 +276,8 @@ class ArchiveApp:
             config = self.read_config()
             self.profile_store.save(config)
             self._reload_profiles()
-            self.profile_choice.set(config.blog_id)
-            self._log(f'블로그를 저장했습니다: {config.blog_id} · {config.out_dir}')
+            self.profile_choice.set(_source_label(config.blog_id))
+            self._log(f'주소를 저장했습니다: {_source_label(config.blog_id)} · {config.out_dir}')
         except (OSError, ValueError, sqlite3.Error) as exc:
             messagebox.showerror('블로그 저장 실패', str(exc), parent=self.root)
 
@@ -273,10 +293,10 @@ class ArchiveApp:
         self._show_counts({})
         self.issues.delete(*self.issues.get_children())
         self.tabs.tab(1, text='확인할 항목 (0)')
-        self.phase.set(f'{config.blog_id} · 백업 준비')
+        self.phase.set(f'{_source_label(config.blog_id)} · 백업 준비')
         self.detail.set('저장한 폴더와 옵션을 불러왔습니다. 백업을 시작하면 기존 파일을 확인하고 이어 처리합니다.')
         self.run_summary.set('기본 백업: 기존 파일 확인 후 건너뛰기 · 새 글과 미완료 항목 저장')
-        self._log(f'블로그 선택: {config.blog_id} · {config.out_dir}')
+        self._log(f'주소 선택: {_source_label(config.blog_id)} · {config.out_dir}')
         if self.tabs.index(self.tabs.select()) == 2:
             self.library.refresh()
 
@@ -304,7 +324,8 @@ class ArchiveApp:
             config = load_config(path)
             self._apply_config(config)
             self.config_path = Path(path).resolve()
-            self.profile_choice.set(config.blog_id if config.blog_id in self.saved_profiles else '')
+            label = _source_label(config.blog_id)
+            self.profile_choice.set(label if label in self.saved_profiles else '')
             self._update_settings_note()
             self._log(f'설정을 불러왔습니다: {path}')
         except (OSError, ValueError) as exc:
@@ -365,17 +386,20 @@ class ArchiveApp:
             widget.configure(state='disabled' if busy else 'normal')
         self.profile_box.configure(state='disabled' if busy else 'readonly')
         self.stop_button.configure(state='normal' if busy and self.current_action != 'doctor' else 'disabled')
+        self._update_login_button()
 
     def start(self, action):
         if self.running:
             return
         try:
             config = None if action == 'doctor' else self.read_config()
+            if action == 'login' and not is_premium(config.blog_id):
+                raise ValueError('네이버 프리미엄 채널 주소를 먼저 입력하세요.')
             if action == 'backup':
                 save_config(config, self.config_path)
                 self.profile_store.save(config)
                 self._reload_profiles()
-            self.runner.start(action, config, refresh=self.refresh.get())
+            self.runner.start(action, config, refresh=False if action == 'login' else self.refresh.get())
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             messagebox.showerror('실행할 수 없습니다', str(exc), parent=self.root)
             return
@@ -383,10 +407,12 @@ class ArchiveApp:
         self._set_busy(True)
         self.phase.set(f'{ACTION_NAMES[action]} 준비 중')
         self.detail.set('중단을 요청하면 현재 요청이 끝나는 대로 진행 내용을 보존하고 멈춥니다.' if action != 'doctor' else 'Python 패키지와 백업용 브라우저 실행을 확인하고 있습니다.')
+        if action == 'login':
+            self.detail.set('전용 브라우저에서 네이버에 직접 로그인하세요. 비밀번호는 프로그램에 입력하지 않습니다.')
         self._progress_phase = None
         self.progress.configure(mode='indeterminate', value=0)
         self.progress.start(12)
-        if action != 'doctor':
+        if action not in ('doctor', 'login'):
             self.last_report = None
             self._show_counts({})
             self.issues.delete(*self.issues.get_children())
@@ -481,7 +507,7 @@ class ArchiveApp:
             self._log(event['message'])
             if event.get('report'):
                 self._show_report(event['report'])
-            if self.tabs.index(self.tabs.select()) == 2:
+            if event['action'] != 'login' and self.tabs.index(self.tabs.select()) == 2:
                 self.library.refresh()
             if self.close_when_done:
                 self.root.destroy()

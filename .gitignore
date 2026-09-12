@@ -34,3 +34,8 @@ failed_html/
 config.toml
 blog_profiles.sqlite
 blog_profiles.sqlite-*
+
+# Browser authentication must never be included in the project or backups.
+.auth/
+naver-session.bin
+playwright/.auth/

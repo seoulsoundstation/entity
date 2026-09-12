@@ -7,6 +7,8 @@ import re
 import sqlite3
 from uuid import NAMESPACE_URL, uuid5
 
+from .addresses import canonical_post_url
+
 
 SCHEMA_VERSION = 2
 _POST_COLUMNS_V1 = {
@@ -18,7 +20,7 @@ _CATALOG_COLUMNS = {'archive_id', 'title', 'body_text', 'published_at', 'archive
 
 def archive_id_for(blog: str, post: str) -> str:
     """The same Naver post keeps its ID even when its archive is rebuilt."""
-    return 'NBA-' + uuid5(NAMESPACE_URL, f'https://blog.naver.com/{blog}/{post}').hex
+    return 'NBA-' + uuid5(NAMESPACE_URL, canonical_post_url(blog, post)).hex
 
 
 def document_metadata(document: str | None, fallback_title: str = '') -> dict:

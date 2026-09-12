@@ -11,6 +11,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from .config import Config
+from .addresses import canonical_post_url
 from .files import archive_lock, atomic_write, inside
 
 
@@ -192,7 +193,7 @@ def create_preview(config: Config, row: dict) -> Path:
         content = renderer.renderer.render(tokens, renderer.options, {})
         title = escape(str(row.get('title') or row.get('post_id') or source.stem))
         md_url = quote(Path(os.path.relpath(source, preview.parent)).as_posix(), safe='/')
-        source_url = 'https://blog.naver.com/' + quote(str(row['blog_id']), safe='') + '/' + quote(str(row['post_id']), safe='')
+        source_url = quote(canonical_post_url(str(row['blog_id']), str(row['post_id'])), safe='/:')
         page = f'''<!doctype html>
 <html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

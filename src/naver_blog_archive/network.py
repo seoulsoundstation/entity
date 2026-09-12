@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import requests
 
 from .config import Config
+from .addresses import PREMIUM_HOST, channel_url, parse_post_url, post_url
 from .page_status import page_unavailable_reason
 from .progress import TaskControl
 
@@ -34,29 +35,6 @@ def original_image_url(url: str) -> str:
     return urlunsplit(parts._replace(query=query))
 
 
-def parse_post_url(url: str) -> tuple[str, str] | None:
-    if url.startswith('//'):
-        url = 'https:' + url
-    parts = urlsplit(url)
-    if parts.scheme not in ('http', 'https') or parts.hostname not in ('blog.naver.com', 'm.blog.naver.com'):
-        return None
-    if parts.path.lower() == '/postview.naver':
-        query = dict(parse_qsl(parts.query))
-        blog, post = query.get('blogId', ''), query.get('logNo', '')
-    else:
-        match = re.fullmatch(r'/([\w-]+)/(\d+)/?', parts.path)
-        if not match:
-            return None
-        blog, post = match.groups()
-    if re.fullmatch(r'[A-Za-z0-9_-]+', blog) and re.fullmatch(r'\d+', post):
-        return blog, post
-    return None
-
-
-def post_url(blog: str, post: str) -> str:
-    return f'https://m.blog.naver.com/{blog}/{post}'
-
-
 @dataclass
 class Listing:
     ids: list[str]
@@ -65,13 +43,74 @@ class Listing:
     total: int | None = None
 
 
+class _PremiumCookieSession(requests.Session):
+    """Only send cookies to the exact Premium HTTPS origin, including redirects."""
+
+    @classmethod
+    def from_session(cls, session: requests.Session):
+        if isinstance(session, cls):
+            return session
+        scoped = cls()
+        # Preserve configured adapters and ordinary Session options without
+        # copying instance-level send overrides that could skip this guard.
+        for name in requests.Session.__attrs__:
+            setattr(scoped, name, getattr(session, name))
+        scoped.cookies = session.cookies.copy()
+        return scoped
+
+    @staticmethod
+    def _scope_cookies(request):
+        try:
+            parts = urlsplit(request.url)
+            permitted = (parts.scheme == 'https' and parts.hostname == PREMIUM_HOST
+                         and parts.port in (None, 443) and parts.username is None
+                         and parts.password is None)
+            host_header = request.headers.get('Host')
+            if host_header is not None:
+                permitted = permitted and host_header.lower() in (PREMIUM_HOST, PREMIUM_HOST + ':443')
+        except (ValueError, TypeError, AttributeError):
+            permitted = False
+        if not permitted:
+            request.headers.pop('Cookie', None)
+            request.headers.pop('Cookie2', None)
+        return request
+
+    def prepare_request(self, request):
+        return self._scope_cookies(super().prepare_request(request))
+
+    def send(self, request, **kwargs):
+        # Session.resolve_redirects calls self.send for every hop. Check here
+        # too, since redirect and caller-prepared requests skip prepare_request.
+        return super().send(self._scope_cookies(request), **kwargs)
+
+
+def apply_premium_cookies(client, storage: dict) -> None:
+    """Narrow browser cookies to the content host before HTTP reuse.
+
+    A normal Domain cookie also matches child hosts. The transport therefore
+    checks the exact HTTPS origin on every outgoing request and redirect.
+    """
+    client.session = _PremiumCookieSession.from_session(client.session)
+    for cookie in storage.get('cookies', []):
+        domain = str(cookie.get('domain', '')).lstrip('.').lower()
+        if domain not in ('naver.com', 'premium.naver.com', PREMIUM_HOST):
+            continue
+        name, value = cookie.get('name'), cookie.get('value')
+        path = cookie.get('path', '/')
+        if not isinstance(name, str) or not isinstance(value, str) or not isinstance(path, str) or not path.startswith('/'):
+            continue
+        expires = cookie.get('expires', -1)
+        expires = int(expires) if isinstance(expires, (int, float)) and expires > 0 else None
+        client.session.cookies.set(name, value, domain=PREMIUM_HOST, path=path, secure=True, expires=expires)
+
+
 class Client:
     def __init__(self, config: Config, control: TaskControl | None = None):
         self.config = config
         self.control = control
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0 Safari/537.36',
-                                     'Referer': f'https://m.blog.naver.com/{config.blog_id}'})
+                                     'Referer': channel_url(config.blog_id)})
         self.last_request = 0.0
 
     def close(self):

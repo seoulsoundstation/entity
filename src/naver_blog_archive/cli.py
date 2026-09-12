@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     gui = subs.add_parser('gui', help='블로그 백업 프로그램 창 열기')
     gui.add_argument('--config', type=Path, default=Path('config.toml'), help='불러올 설정 파일 (기본: config.toml)')
     for name, help_text in (('backup', '신규 글 백업 및 미완료 작업 재개'),
+                            ('login', '전용 브라우저에서 네이버 프리미엄콘텐츠 로그인'),
                             ('reformat', '재다운로드 없이 저장 파일명을 제목으로 변경하고 Markdown 링크 정리'),
                             ('status', '마지막 실행 결과와 실패 항목 확인'),
                             ('verify', '저장 파일의 누락·변경 및 출처 연결 검사')):
@@ -71,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         from .config import load_config
         from .archive import backup, inspect_archive, reformat_archive
         config = load_config(args.config)
+        if args.command == 'login':
+            from .premium_auth import login
+            login(config)
+            print('네이버 로그인을 저장했습니다. backup 명령으로 백업하세요.')
+            return 0
         if args.command == 'backup':
             report = backup(config, refresh=args.refresh)
         elif args.command == 'reformat':

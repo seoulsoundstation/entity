@@ -10,13 +10,14 @@ import re
 from urllib.parse import quote, urlsplit
 
 from .assets import Assets
+from .addresses import is_premium
 from .attachment_links import attachment_identity, file_links_from_html, upgrade_file_links
 from .cached_cards import upgrade_link_cards
 from .cached_navigation import clean_cached_navigation
 from .config import Config
 from .file_assets import FileAssets
 from .files import archive_lock, atomic_write, digest, inside
-from .network import Client, Renderer, parse_post_url, post_url
+from .network import Client, Renderer, apply_premium_cookies, parse_post_url, post_url
 from .note_paths import migrate_note_names, recover_note_moves, titled_path
 from .parser import compose, extract_post, md_link
 from .progress import OperationCancelled, TaskControl
@@ -25,6 +26,12 @@ from .state import State
 
 def active(config: Config, row) -> bool:
     return row['depth'] == 0 or (config.follow_sources and row['depth'] <= config.source_depth)
+
+
+def source_in_scope(config: Config, target) -> bool:
+    # Existing public-blog backups must not acquire a new login requirement
+    # merely because one citation now has a recognized Premium URL.
+    return not target or not is_premium(target[0]) or is_premium(config.blog_id)
 
 
 def active_rows(config: Config, rows) -> list[dict]:
@@ -43,6 +50,8 @@ def active_rows(config: Config, rows) -> list[dict]:
                 continue
             target = source.get('target')
             target = tuple(target) if target else None
+            if not source_in_scope(config, target):
+                continue
             if target in by_key and target not in depths:
                 depths[target] = depth + 1
                 queue.append(target)
@@ -203,7 +212,7 @@ def format_note(config: Config, state: State, row, download=None, file_download=
                 local_href = quote(Path(os.path.relpath(local_path, base)).as_posix(), safe='/')
             replacements[source['token']] = format_link_card(source, image_targets.get(source.get('thumbnail_token')), local_href)
             continue
-        follow = config.follow_sources and row['depth'] < config.source_depth
+        follow = config.follow_sources and row['depth'] < config.source_depth and source_in_scope(config, target)
         if follow and target:
             saved = state.get(*target)
             if saved and saved['content_ok'] and saved['path'] and inside(config.out_dir, saved['path']).is_file():
@@ -392,7 +401,7 @@ def discover_sources(config: Config, state: State, client, control: TaskControl,
                 source['target'] = parse_post_url(client.resolve_source(source['url']))
             except Exception as exc:
                 source['resolve_error'] = str(exc)
-        if source.get('target'):
+        if source.get('target') and source_in_scope(config, source['target']):
             state.discover(*source['target'], depth=row['depth'] + 1)
 
 
@@ -420,10 +429,24 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
            control: TaskControl | None = None) -> dict:
     control = control or TaskControl()
     control.check()
+    session = None
+    if is_premium(config.blog_id):
+        from .premium import PremiumClient, PremiumLoginRequired, PremiumRenderer
+        if client is None:
+            from .premium_auth import has_login_cookies, load_session
+            session = load_session()
+            if not session or not has_login_cookies(session):
+                raise PremiumLoginRequired('먼저 네이버 로그인 버튼으로 구독 계정에 로그인하세요.')
     with archive_lock(config.out_dir):
         state = State(config.out_dir)
-        client = client or Client(config, control=control)
-        renderer = renderer or Renderer(config, control=control)
+        if is_premium(config.blog_id):
+            client = client or PremiumClient(config, control=control)
+            if session:
+                apply_premium_cookies(client, session)
+            renderer = renderer or PremiumRenderer(config, client, control=control)
+        else:
+            client = client or Client(config, control=control)
+            renderer = renderer or Renderer(config, control=control)
         run_id = None
         attempted, reused = set(), set()
         run_counts = {'saved': 0, 'reused': 0, 'failed': 0}
@@ -498,7 +521,11 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                         if fetched:
                             if refresh:
                                 state.update(*key, document=None, content_ok=0)
-                            document = extract_post(renderer.render(*key), *key)
+                            if is_premium(key[0]):
+                                from .premium import extract_premium_post
+                                document = extract_premium_post(renderer.render(*key), *key)
+                            else:
+                                document = extract_post(renderer.render(*key), *key)
                             control.check()
                             state.update(*key, document=json.dumps(document, ensure_ascii=False), content_ok=0)
                             control.wait(config.delay)
@@ -521,6 +548,12 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                                      error=f'{type(exc).__name__}: {exc}')
                         message = f'실패: {key[0]}/{key[1]} {exc}'
                         print(message)
+                        if is_premium(key[0]):
+                            from .premium import PremiumLoginRequired
+                            if isinstance(exc, PremiumLoginRequired):
+                                # Reauthentication is one user action; do not
+                                # repeat an expired session across every post.
+                                raise
                     attempted.add(key)
                     saved_status = state.get(*key)['status']
                     counts[previous_status] -= 1

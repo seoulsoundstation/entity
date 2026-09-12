@@ -457,3 +457,94 @@ def test_report_distinguishes_attachment_failures_and_cached_link_updates(app):
     assert rows[1][1:] == ('첨부파일', '첨부파일 저장 미완료')
     assert '링크 카드 2개 정리' in app.run_summary.get()
     assert '첨부 링크 3개 정리' in app.run_summary.get()
+
+
+def test_premium_address_enables_login_and_incomplete_or_blog_input_disables_it(app):
+    assert app.login_button.instate(['disabled'])
+    app.blog.set('https://contents.premium.naver.com/salarymoney')
+    assert app.login_button.instate(['disabled'])
+    assert not app.test_dialogs
+    app.blog.set('https://contents.premium.naver.com/salarymoney/moneystock')
+    assert not app.login_button.instate(['disabled'])
+    assert app.read_config().blog_id == 'premium/salarymoney/moneystock'
+    assert '전용 브라우저' in app.login_note.get()
+    app.blog.set('salarymoney')
+    assert app.login_button.instate(['disabled'])
+
+
+def test_premium_login_keeps_backup_settings_and_previous_result(app, monkeypatch):
+    app.blog.set('https://contents.premium.naver.com/salarymoney/moneystock')
+    app.refresh.set(True)
+    report = {'posts': {'success': 42}}
+    app._show_report(report)
+    app.tabs.select(2)
+    app.library.query.set('기존 검색어')
+    refreshes = []
+    monkeypatch.setattr(app.library, 'refresh', lambda: refreshes.append(True))
+    app.login_button.invoke()
+    assert len(app.runner.starts) == 1
+    action, config, refresh = app.runner.starts[0]
+    assert action == 'login'
+    assert config.blog_id == 'premium/salarymoney/moneystock'
+    assert refresh is False
+    assert app.running
+    assert app.login_button.instate(['disabled'])
+    assert not app.stop_button.instate(['disabled'])
+    assert app.last_report == report
+    assert app.counts['success'].get() == '42'
+    assert app.tabs.index(app.tabs.select()) == 2
+    assert app.library.query.get() == '기존 검색어'
+    assert not refreshes
+    assert not app.config_path.exists()
+    assert not app.profile_store.path.exists()
+    app._handle_event({'kind': 'done', 'action': 'login', 'status': 'success',
+                       'message': '로그인 정보를 저장했습니다.', 'report': None})
+    assert not app.running
+    assert not app.login_button.instate(['disabled'])
+    assert app.last_report == report
+    assert app.counts['success'].get() == '42'
+    assert app.tabs.index(app.tabs.select()) == 2
+    assert app.library.query.get() == '기존 검색어'
+    assert not refreshes
+
+
+def test_blog_cannot_start_premium_login(app):
+    set_valid_inputs(app)
+    app.start('login')
+    assert not app.running
+    assert app.runner.starts == []
+    assert '프리미엄 채널 주소' in app.test_dialogs[-1][1]
+
+
+def test_premium_profile_restores_readable_channel_address_and_options(app, tmp_path):
+    address = 'https://contents.premium.naver.com/salarymoney/moneystock'
+    app.blog.set(address)
+    app.folder.set(str(tmp_path / 'premium'))
+    app.files.set(False)
+    app.save_profile()
+    expected = app.read_config()
+    assert app.profile_choice.get() == address
+    assert app.profile_store.list() == [expected]
+    app.blog.set('salarymoney')
+    app.folder.set(str(tmp_path / 'blog'))
+    app.files.set(True)
+    app.save_profile()
+    assert set(app.profile_box['values']) == {'salarymoney', address}
+    app.profile_choice.set(address)
+    app.select_profile()
+    assert app.blog.get() == address
+    assert app.read_config() == expected
+    assert not app.login_button.instate(['disabled'])
+    assert app.files.get() is False
+
+
+def test_premium_backup_disables_login_until_worker_finishes(app):
+    app.blog.set('https://contents.premium.naver.com/salarymoney/moneystock')
+    app.start('backup')
+    assert app.login_button.instate(['disabled'])
+    assert len(app.runner.starts) == 1
+    app.login_button.invoke()
+    assert len(app.runner.starts) == 1
+    app._handle_event({'kind': 'done', 'action': 'backup', 'status': 'success',
+                       'message': '백업 완료', 'report': None})
+    assert not app.login_button.instate(['disabled'])

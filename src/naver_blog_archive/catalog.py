@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import sqlite3
 
 from .config import Config
+from .addresses import canonical_post_url
 from .state import SCHEMA_VERSION, archive_id_for, document_metadata, validate_schema
 
 
@@ -98,5 +99,5 @@ def get_archived_post(config: Config, archive_id: str) -> dict | None:
     if row is None:
         return None
     result = dict(row)
-    result['source_url'] = f'https://blog.naver.com/{result["blog_id"]}/{result["post_id"]}'
+    result['source_url'] = canonical_post_url(result['blog_id'], result['post_id'])
     return result

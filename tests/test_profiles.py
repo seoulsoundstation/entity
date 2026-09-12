@@ -75,3 +75,21 @@ def test_old_saved_profile_gets_attachment_defaults_without_rewriting_database(t
     assert profiles[0].max_file_mb == 100
     assert profiles[0].download_images is False
     assert path.read_bytes() == before
+
+
+def test_premium_channels_do_not_overwrite_each_other_or_same_owner_blog(tmp_path):
+    store = ProfileStore(tmp_path / 'profiles.sqlite')
+    configs = [
+        Config('salarymoney', tmp_path / 'blog'),
+        Config('premium/salarymoney/moneystock', tmp_path / 'premium'),
+        Config('premium/salarymoney/other', tmp_path / 'other', download_images=False),
+    ]
+    for config in configs:
+        store.save(config)
+    updated = replace(configs[1], download_files=False, max_file_mb=250)
+    store.save(updated)
+    profiles = {config.blog_id: config for config in store.list()}
+    assert profiles == {configs[0].blog_id: configs[0], updated.blog_id: updated,
+                        configs[2].blog_id: configs[2]}
+    with sqlite3.connect(store.path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 1

@@ -6,10 +6,10 @@ from pathlib import Path
 import json
 import math
 import os
-import re
 import sys
 import tempfile
-from urllib.parse import parse_qs, unquote, urlsplit
+
+from .addresses import normalize_blog_id, valid_source_key
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -33,40 +33,6 @@ class Config:
     max_file_mb: int = 100
 
 
-def normalize_blog_id(value: str) -> str:
-    """Accept a blog ID or a public Naver homepage/post URL, without networking."""
-    message = '네이버 블로그 ID 또는 blog.naver.com의 블로그 주소를 입력하세요.'
-    if not isinstance(value, str):
-        raise ValueError(message)
-    value = value.strip()
-    if re.fullmatch(r'[A-Za-z0-9_-]+', value):
-        return value
-    if any(character.isspace() or ord(character) < 32 for character in value):
-        raise ValueError(message)
-    if '://' not in value:
-        value = 'https://' + value
-    try:
-        parts = urlsplit(value)
-        if (parts.scheme not in ('http', 'https')
-                or parts.hostname not in ('blog.naver.com', 'm.blog.naver.com')
-                or parts.username is not None or parts.password is not None
-                or parts.port is not None):
-            raise ValueError(message)
-        segments = [unquote(part) for part in parts.path.strip('/').split('/')]
-        if len(segments) == 1 and segments[0].lower() in ('postview.naver', 'postlist.naver'):
-            identifiers = parse_qs(parts.query, keep_blank_values=True).get('blogId', [])
-            blog_id = identifiers[0] if len(identifiers) == 1 else ''
-        elif len(segments) == 1 or (len(segments) == 2 and segments[1].isdigit()):
-            blog_id = segments[0]
-        else:
-            blog_id = ''
-    except ValueError as exc:
-        raise ValueError(message) from exc
-    if not re.fullmatch(r'[A-Za-z0-9_-]+', blog_id):
-        raise ValueError(message)
-    return blog_id
-
-
 def config_from_mapping(data: Mapping[str, object], base_dir: str | Path | None = None) -> Config:
     """Validate file or GUI settings identically, without mutating the caller's data."""
     data = dict(data)
@@ -74,8 +40,8 @@ def config_from_mapping(data: Mapping[str, object], base_dir: str | Path | None 
     if unknown:
         raise ValueError(f"알 수 없는 설정: {', '.join(sorted(map(str, unknown)))}")
     blog_id = data.get('blog_id')
-    if not isinstance(blog_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', blog_id):
-        raise ValueError('blog_id에 유효한 블로그 ID를 지정하세요.')
+    if not valid_source_key(blog_id):
+        raise ValueError('blog_id에 유효한 블로그 ID 또는 premium/소유자/채널을 지정하세요.')
     out = data.get('out_dir', 'naver_blog_backup')
     if not isinstance(out, str) or not out.strip():
         raise ValueError('out_dir는 비어 있지 않은 경로여야 합니다.')
