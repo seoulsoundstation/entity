@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--version', action='version', version='%(prog)s 0.2.0')
     subs = parser.add_subparsers(dest='command', required=True)
     subs.add_parser('doctor', help='Python 의존성과 Chromium 실행 검사')
+    subs.add_parser('prepare-transcription', help='로컬 음성 인식 패키지와 small 모델 준비 (최초 인터넷 다운로드)')
     gui = subs.add_parser('gui', help='블로그 백업 프로그램 창 열기')
     gui.add_argument('--config', type=Path, default=Path('config.toml'), help='불러올 설정 파일 (기본: config.toml)')
     for name, help_text in (('backup', '신규 글 백업 및 미완료 작업 재개'),
@@ -59,6 +60,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == 'doctor':
             return doctor()
+        if args.command == 'prepare-transcription':
+            from .progress import TaskControl
+            from .transcription import prepare_transcription
+            prepare_transcription(control=TaskControl(lambda event: print(event.get('message', ''), flush=True)))
+            print('로컬 음성 인식 준비가 끝났습니다. backup 명령으로 영상 텍스트화를 시작하세요.')
+            return 0
         if args.command == 'gui':
             from .gui import launch
             return launch(config_path=args.config)
@@ -92,7 +99,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if report['output_problems'] or report['failures'] else 0
         return 0
     except KeyboardInterrupt:
-        print('\n중단했습니다. 같은 backup 명령을 다시 실행하면 미완료 작업을 재개합니다.', file=sys.stderr)
+        message = ('음성 인식 준비를 중단했습니다. prepare-transcription 명령으로 다시 실행하세요.'
+                   if args.command == 'prepare-transcription'
+                   else '중단했습니다. 같은 backup 명령을 다시 실행하면 미완료 작업을 재개합니다.')
+        print('\n' + message, file=sys.stderr)
         return 130
     except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as exc:
         print(f'오류: {exc}', file=sys.stderr)

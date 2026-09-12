@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from html import escape
 import json
 import re
 from urllib.parse import urljoin, urlsplit
@@ -27,7 +28,7 @@ class PremiumAccessDenied(ValueError):
 
 
 def _outside_content(element) -> bool:
-    return not any(parent.get('id') in ('ct', 'ct_wrap', '_SE_VIEWER_CONTENT')
+    return not any(parent.get('id') in ('ct', 'ct_wrap', '_SE_VIEWER_CONTENT', '_VIEWER_VIDEO_CONTENT')
                    or 'se-main-container' in parent.get('class', []) for parent in element.parents)
 
 
@@ -56,7 +57,8 @@ def _login_error() -> PremiumLoginRequired:
 
 
 def _published_at(soup) -> str | None:
-    element = soup.select_one('.viewer_date_text')
+    element = next((item for item in soup.select('.viewer_date_text, .viewer_video_meta_text')
+                    if re.match(r'\d{4}\.\d{1,2}\.\d{1,2}\.', item.get_text(' ', strip=True))), None)
     if element is None:
         return None
     text = ' '.join(element.get_text(' ', strip=True).split())
@@ -85,6 +87,9 @@ def extract_premium_post(html: str, blog: str, post: str) -> dict:
         raise _login_error()
     soup = BeautifulSoup(html, 'html.parser')
     viewer = soup.select_one('#_SE_VIEWER_CONTENT')
+    video = viewer is None
+    if video:
+        viewer = soup.select_one('._VOD_PLAYER_WRAP[data-type="VIDEO"]')
     if viewer is None:
         raise ValueError('프리미엄콘텐츠 본문 영역을 찾지 못했습니다.')
     _, owner, channel = blog.split('/')
@@ -93,6 +98,28 @@ def extract_premium_post(html: str, blog: str, post: str) -> dict:
         raise ValueError('요청한 채널·글과 다른 본문이 반환되었습니다.')
     if viewer.get('data-content-auth') != 'true' or viewer.select_one('.viewer_paywall') is not None:
         raise PremiumAccessDenied('이 글의 전체 열람 권한이 없습니다. 구독 상태를 확인하세요. 미리보기는 저장하지 않습니다.')
+    if video:
+        if viewer.get('data-is-preview') == 'true' or viewer.select_one('._VIEWER_VIDEO_PLAYER_PAYWALL') is not None:
+            raise PremiumAccessDenied('이 영상의 전체 열람 권한이 없습니다. 미리보기는 저장하지 않습니다.')
+        details = soup.select_one('#_VIEWER_VIDEO_CONTENT')
+        if details is None or details.select_one('.viewer_paywall') is not None:
+            raise ValueError('열람 가능한 영상 설명 영역을 찾지 못했습니다.')
+        video_id = viewer.get('data-video-id', '')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', video_id):
+            raise ValueError('영상 식별자를 확인할 수 없습니다.')
+        title = details.select_one('.viewer_video_title')
+        meta = soup.select_one('meta[property="og:title"]')
+        title_text = (title.get_text(' ', strip=True) if title else
+                      meta.get('content', '') if meta else '') or post
+        description = details.select_one('.viewer_video_desc')
+        body = (str(description) if description is not None and (description.get_text(strip=True) or description.find('img'))
+                else '<p>영상 설명이 없습니다.</p>')
+        document = extract_post('<div class="se-title-text">' + escape(title_text)
+                                + '</div><div class="se-main-container">' + body + '</div>', blog, post)
+        from .parser import md_link
+        document['markdown'] += '\n\n' + md_link('영상 원문 열기', post_url(blog, post))
+        document.update(content_type='video', video_id=video_id, published_at=_published_at(details))
+        return document
     if viewer.select_one('.se-main-container') is None:
         raise ValueError('열람 가능한 프리미엄콘텐츠 본문을 찾지 못했습니다.')
     document = extract_post(str(viewer), blog, post)

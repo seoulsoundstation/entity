@@ -33,6 +33,8 @@ def document_metadata(document: str | None, fallback_title: str = '') -> dict:
         data = {}
     body = data.get('markdown')
     body = body if isinstance(body, str) else ''
+    if isinstance(data.get('video_text'), str):
+        body += '\n\n' + data['video_text']
     replacements = {}
     for name, label in (('images', 'alt'), ('sources', 'title'), ('files', 'name')):
         entries = data.get(name)

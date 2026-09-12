@@ -31,6 +31,7 @@ class Config:
     max_pages: int = 10000
     download_files: bool = True
     max_file_mb: int = 100
+    transcribe_videos: bool = True
 
 
 def config_from_mapping(data: Mapping[str, object], base_dir: str | Path | None = None) -> Config:
@@ -48,7 +49,7 @@ def config_from_mapping(data: Mapping[str, object], base_dir: str | Path | None 
     out_path = Path(out).expanduser()
     base = Path(base_dir).expanduser() if base_dir is not None else Path.cwd()
     data['out_dir'] = (base / out_path).resolve()
-    for key in ('download_images', 'follow_sources', 'download_files'):
+    for key in ('download_images', 'follow_sources', 'download_files', 'transcribe_videos'):
         if key in data and type(data[key]) is not bool:
             raise ValueError(f'{key}는 true 또는 false여야 합니다.')
     for key, low, high in (('source_depth', 0, 3), ('retries', 1, 10),

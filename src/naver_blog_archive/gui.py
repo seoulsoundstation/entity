@@ -28,7 +28,8 @@ GREEN = '#087f62'
 STATUS_NAMES = {'success': '완료', 'partial': '부분 완료', 'failed': '실패',
                 'pending': '대기', 'running': '진행 중', 'interrupted': '중단', 'error': '오류'}
 ACTION_NAMES = {'backup': '백업', 'verify': '파일 검사', 'status': '상태 확인', 'doctor': '환경 진단',
-                'reformat': '저장 결과 정리', 'login': '네이버 로그인'}
+                'reformat': '저장 결과 정리', 'login': '네이버 로그인',
+                'prepare-transcription': '음성 인식 준비'}
 
 
 def _source_label(blog_id: str) -> str:
@@ -66,6 +67,7 @@ class ArchiveApp:
         self.folder = tk.StringVar(value=str(self.config_path.parent / 'naver_blog_backup'))
         self.images = tk.BooleanVar(value=True)
         self.files = tk.BooleanVar(value=True)
+        self.videos = tk.BooleanVar(value=True)
         self.sources = tk.BooleanVar(value=True)
         self.refresh = tk.BooleanVar(value=False)
         self.login_note = tk.StringVar()
@@ -162,10 +164,14 @@ class ArchiveApp:
         options.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(7, 0))
         for index, (label, variable) in enumerate([
                 ('이미지 저장', self.images), ('첨부파일 저장', self.files),
-                ('인용 원본 저장', self.sources), ('기존 글도 최신 내용으로 갱신', self.refresh)]):
+                ('인용 원본 저장', self.sources), ('기존 글도 최신 내용으로 갱신', self.refresh),
+                ('영상 텍스트화', self.videos)]):
             widget = ttk.Checkbutton(options, text=label, variable=variable, style=self.control_styles.checkbutton)
             widget.grid(row=index // 2, column=index % 2, sticky='w', padx=(0, 14))
             self._input_widgets.append(widget)
+        self.prepare_button = ttk.Button(options, text='음성 인식 준비', command=lambda: self.start('prepare-transcription'))
+        self.prepare_button.grid(row=2, column=1, sticky='w', padx=(0, 14), pady=(3, 0))
+        self._input_widgets.append(self.prepare_button)
         setting_actions = ttk.Frame(settings, style='Card.TFrame')
         setting_actions.grid(row=6, column=0, columnspan=3, sticky='ew', pady=(7, 0))
         for label, command in [('세부 설정', self.advanced_settings), ('설정 불러오기', self.load_settings), ('설정 저장', self.save_settings)]:
@@ -257,6 +263,7 @@ class ArchiveApp:
         self.folder.set(str(config.out_dir))
         self.images.set(config.download_images)
         self.files.set(config.download_files)
+        self.videos.set(config.transcribe_videos)
         self.sources.set(config.follow_sources)
 
     def _reload_profiles(self):
@@ -308,7 +315,7 @@ class ArchiveApp:
         values = dict(self._advanced)
         values.update(blog_id=normalize_blog_id(self.blog.get()), out_dir=self.folder.get().strip(),
                       download_images=self.images.get(), follow_sources=self.sources.get(),
-                      download_files=self.files.get())
+                      download_files=self.files.get(), transcribe_videos=self.videos.get())
         return config_from_mapping(values, base_dir=self.config_path.parent)
 
     def choose_folder(self):
@@ -392,14 +399,14 @@ class ArchiveApp:
         if self.running:
             return
         try:
-            config = None if action == 'doctor' else self.read_config()
+            config = None if action in ('doctor', 'prepare-transcription') else self.read_config()
             if action == 'login' and not is_premium(config.blog_id):
                 raise ValueError('네이버 프리미엄 채널 주소를 먼저 입력하세요.')
             if action == 'backup':
                 save_config(config, self.config_path)
                 self.profile_store.save(config)
                 self._reload_profiles()
-            self.runner.start(action, config, refresh=False if action == 'login' else self.refresh.get())
+            self.runner.start(action, config, refresh=self.refresh.get() if action == 'backup' else False)
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             messagebox.showerror('실행할 수 없습니다', str(exc), parent=self.root)
             return
@@ -409,10 +416,12 @@ class ArchiveApp:
         self.detail.set('중단을 요청하면 현재 요청이 끝나는 대로 진행 내용을 보존하고 멈춥니다.' if action != 'doctor' else 'Python 패키지와 백업용 브라우저 실행을 확인하고 있습니다.')
         if action == 'login':
             self.detail.set('전용 브라우저에서 네이버에 직접 로그인하세요. 비밀번호는 프로그램에 입력하지 않습니다.')
+        elif action == 'prepare-transcription':
+            self.detail.set('처음에는 음성 인식 패키지와 모델(약 500 MB)을 내려받습니다. 영상·음성은 외부로 전송하지 않고 이 PC에서 처리합니다.')
         self._progress_phase = None
         self.progress.configure(mode='indeterminate', value=0)
         self.progress.start(12)
-        if action not in ('doctor', 'login'):
+        if action not in ('doctor', 'login', 'prepare-transcription'):
             self.last_report = None
             self._show_counts({})
             self.issues.delete(*self.issues.get_children())
@@ -428,7 +437,11 @@ class ArchiveApp:
         self.stop_button.configure(state='disabled')
         self.phase.set('중단 요청을 처리하고 있습니다')
         self.detail.set('진행 중인 네트워크 요청은 설정한 제한 시간까지 기다릴 수 있습니다. 창을 닫지 말고 잠시 기다려 주세요.')
-        self._log('중단을 요청했습니다. 저장된 글은 다음 백업에서 재사용합니다.')
+        if self.current_action == 'prepare-transcription':
+            self.detail.set('음성 인식 준비 작업을 종료하고 있습니다. 완료 안내가 나올 때까지 잠시 기다려 주세요.')
+            self._log('음성 인식 준비 중단을 요청했습니다.')
+        else:
+            self._log('중단을 요청했습니다. 저장된 글과 완료된 영상 텍스트는 다음 백업에서 재사용합니다.')
 
     def _show_counts(self, counts):
         for key in ('success', 'partial', 'failed'):
@@ -507,7 +520,7 @@ class ArchiveApp:
             self._log(event['message'])
             if event.get('report'):
                 self._show_report(event['report'])
-            if event['action'] != 'login' and self.tabs.index(self.tabs.select()) == 2:
+            if event['action'] not in ('login', 'prepare-transcription') and self.tabs.index(self.tabs.select()) == 2:
                 self.library.refresh()
             if self.close_when_done:
                 self.root.destroy()
@@ -522,11 +535,23 @@ class ArchiveApp:
         if 'run_counts' in event:
             self._show_run_counts(event['run_counts'])
         phase = event.get('phase')
-        if phase != self._progress_phase and phase in ('starting', 'listing', 'linking', 'doctor'):
+        if phase != self._progress_phase and phase in ('starting', 'listing', 'linking', 'doctor', 'transcription-setup', 'video-download', 'transcribing'):
             self.progress.stop()
             self.progress.configure(mode='indeterminate', value=0)
             self.progress.start(12)
         self._progress_phase = phase
+        if phase in ('transcribing', 'video-download'):
+            current_key, total_key = ('seconds', 'total_seconds') if phase == 'transcribing' else ('bytes', 'total_bytes')
+            current, total = event.get(current_key), event.get(total_key)
+            if isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
+                self.progress.stop()
+                self.progress.configure(mode='determinate', maximum=100, value=max(0, min(100, current / total * 100)))
+                if not self.stopping:
+                    if phase == 'transcribing':
+                        self.detail.set(f'로컬 음성 인식 · {current:,.0f} / {total:,.0f}초 처리 · 영상·음성 외부 전송 없음')
+                    else:
+                        self.detail.set(f'텍스트 변환용 임시 영상 다운로드 · {current / 1048576:,.1f} / {total / 1048576:,.1f} MiB')
+            return
         total = event.get('total')
         if isinstance(total, (int, float)) and total > 0 and 'completed' in event:
             self.progress.stop()

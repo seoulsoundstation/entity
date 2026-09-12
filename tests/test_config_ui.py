@@ -87,6 +87,7 @@ def test_mapping_is_not_mutated_and_resolves_relative_directory(tmp_path):
 @pytest.mark.parametrize('setting', [
     {'delay': float('nan')}, {'timeout': 0}, {'retries': True},
     {'download_images': 'true'}, {'download_files': 'true'}, {'download_files': 1},
+    {'transcribe_videos': 'true'}, {'transcribe_videos': 1},
     {'max_file_mb': 0}, {'max_file_mb': 2049}, {'max_file_mb': True},
     {'max_file_mb': 1.5}, {'source_depth': 4}, {'unexpected': 1},
     {'blog_id': 'https://blog.naver.com/demo'},
@@ -101,7 +102,7 @@ def test_save_roundtrip_preserves_unicode_spaces_options_and_absolute_directory(
         'blog_id': 'demo', 'out_dir': '한글 폴더 📚', 'download_images': False,
         'follow_sources': False, 'source_depth': 3, 'retries': 8,
         'delay': 1.25, 'timeout': 25, 'max_image_mb': 99, 'max_pages': 15,
-        'download_files': False, 'max_file_mb': 2048,
+        'download_files': False, 'max_file_mb': 2048, 'transcribe_videos': False,
     }, base_dir=tmp_path)
     target = tmp_path / 'settings' / 'saved.toml'
     save_config(config, target)
@@ -116,6 +117,7 @@ def test_old_config_enables_attachment_backup_with_default_limit(tmp_path):
     assert config.download_files is True
     assert config.max_file_mb == 100
     assert config.download_images is False
+    assert config.transcribe_videos is True
 
 
 @pytest.mark.parametrize('limit', [1, 100, 2048])

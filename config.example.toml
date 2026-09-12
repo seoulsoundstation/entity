@@ -4,6 +4,9 @@ delay = 0.5
 download_images = true
 # PDF·Excel·ZIP 등 글에 첨부된 파일도 저장합니다. 이미지 저장과 별도 설정입니다.
 download_files = true
+# 프리미엄 영상을 자막 우선, 자막이 없으면 로컬 음성 인식으로 텍스트화합니다.
+# 최초 음성 인식은 GUI의 '음성 인식 준비' 또는 prepare-transcription 명령으로 준비하세요.
+transcribe_videos = true
 follow_sources = true
 
 # 상대 out_dir는 이 설정 파일 위치를 기준으로 해석합니다.

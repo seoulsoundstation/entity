@@ -22,6 +22,7 @@ from .note_paths import migrate_note_names, recover_note_moves, titled_path
 from .parser import compose, extract_post, md_link
 from .progress import OperationCancelled, TaskControl
 from .state import State
+from .videos import transcript_complete, transcribe_video, video_errors, video_markdown
 
 
 def active(config: Config, row) -> bool:
@@ -164,7 +165,9 @@ def write_note(config: Config, state: State, row, content: bytes):
 
 def format_note(config: Config, state: State, row, download=None, file_download=None):
     document = json.loads(row['document'])
-    replacements, errors, image_targets = {}, [], {}
+    replacements, errors, image_targets = {}, video_errors(config, document), {}
+    if document.get('content_type') == 'video':
+        document['markdown'] += '\n\n' + video_markdown(config, document)
     relative = row['path'] or titled_path(config, row)
     base = inside(config.out_dir, relative).parent
     for image in document['images']:
@@ -315,6 +318,11 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
                      completed=index - 1, total=len(rows), blog_id=row['blog'], post_id=row['post'])
         errors = []
         content_ok = bool(row['document'])
+        if row['document']:
+            missing_video = video_errors(config, json.loads(row['document']))
+            if missing_video:
+                errors.extend(missing_video)
+                content_ok = 0
         if row['path']:
             path = inside(config.out_dir, row['path'])
             if not path.is_file():
@@ -407,6 +415,8 @@ def discover_sources(config: Config, state: State, client, control: TaskControl,
 
 def reusable_post(config: Config, row, document) -> bool:
     if row['status'] != 'success' or not row['content_ok'] or not row['path'] or not document:
+        return False
+    if video_errors(config, document):
         return False
     # A larger citation depth or newly enabled source collection can expose a
     # short URL that the preceding offline file verification cannot resolve.
@@ -517,27 +527,54 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                                      run_counts=dict(run_counts))
                         control.check()
                         state.update(*key, status='running', attempts=row['attempts'] + 1)
-                        fetched = refresh or not row['document']
+                        fetched = refresh or not row['document'] or bool(document and document.get('video_refresh_pending'))
                         if fetched:
+                            cached_document = document
                             if refresh:
-                                state.update(*key, document=None, content_ok=0)
+                                if cached_document and transcript_complete(cached_document):
+                                    cached_document['video_refresh_pending'] = True
+                                    state.update(*key, document=json.dumps(cached_document, ensure_ascii=False), content_ok=0)
+                                else:
+                                    state.update(*key, document=None, content_ok=0)
                             if is_premium(key[0]):
                                 from .premium import extract_premium_post
                                 document = extract_premium_post(renderer.render(*key), *key)
                             else:
                                 document = extract_post(renderer.render(*key), *key)
+                            if (cached_document and document.get('content_type') == 'video'
+                                    and document.get('video_id') == cached_document.get('video_id')
+                                    and transcript_complete(cached_document)):
+                                for field in ('video_transcript', 'video_text'):
+                                    document[field] = cached_document[field]
                             control.check()
                             state.update(*key, document=json.dumps(document, ensure_ascii=False), content_ok=0)
                             control.wait(config.delay)
                         if not fetched:
                             refresh_file_urls(config, state, client, control, row, document)
+                        if document.get('content_type') == 'video':
+                            try:
+                                transcribe_video(config, client, document, control)
+                            except Exception as exc:
+                                from .premium import PremiumLoginRequired
+                                from .transcription import TranscriptionError
+                                if isinstance(exc, PremiumLoginRequired):
+                                    raise
+                                # Signed playback URLs must never enter the DB or logs.
+                                if isinstance(exc, (TranscriptionError, ValueError)) and 'http' not in str(exc).lower():
+                                    document['video_error'] = str(exc)
+                                else:
+                                    document['video_error'] = f'영상 처리 오류 ({type(exc).__name__}). 다시 백업하면 재시도합니다.'
+                            finally:
+                                # Checkpoint finished speech recognition before
+                                # a later cancellation or citation request.
+                                state.update(*key, document=json.dumps(document, ensure_ascii=False))
                         discover_sources(config, state, client, control, row, document)
                         state.update(*key, document=json.dumps(document, ensure_ascii=False))
                         row = dict(state.get(*key), depth=row['depth'])
                         content, errors = format_note(config, state, row, assets, file_assets)
                         control.check()
                         write_note(config, state, row, content)
-                        own_errors = [e for e in errors if e.startswith(('이미지', '첨부파일'))]
+                        own_errors = [e for e in errors if e.startswith(('이미지', '첨부파일', '영상'))]
                         state.update(*key, content_ok=not own_errors, status='partial' if errors else 'success', error='; '.join(errors))
                         title = document['title']
                         message = f'{"부분 성공" if errors else "저장 확인"}: {key[0]}/{key[1]} {title[:50]}'
@@ -664,7 +701,7 @@ def reformat_archive(config: Config, *, control: TaskControl | None = None) -> d
                 try:
                     content, errors = format_note(config, state, row)
                     updated += bool(write_note(config, state, row, content))
-                    state.update(row['blog'], row['post'], content_ok=not any(e.startswith(('이미지', '첨부파일')) for e in errors),
+                    state.update(row['blog'], row['post'], content_ok=not any(e.startswith(('이미지', '첨부파일', '영상')) for e in errors),
                                  status='partial' if errors else 'success', error='; '.join(errors))
                 except Exception as exc:
                     state.update(row['blog'], row['post'], status='partial', content_ok=0, error=str(exc))

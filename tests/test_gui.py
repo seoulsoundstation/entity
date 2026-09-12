@@ -53,6 +53,7 @@ def test_form_normalizes_url_and_preserves_advanced_settings_and_options(app):
     set_valid_inputs(app)
     app.images.set(False)
     app.files.set(False)
+    app.videos.set(False)
     app.sources.set(False)
     app._advanced.update(delay=1.5, retries=7, source_depth=2, max_pages=321, max_file_mb=250)
     config = app.read_config()
@@ -60,6 +61,7 @@ def test_form_normalizes_url_and_preserves_advanced_settings_and_options(app):
     assert config.out_dir == app.config_path.parent / '저장 폴더'
     assert not config.download_images
     assert not config.download_files
+    assert not config.transcribe_videos
     assert config.max_file_mb == 250
     assert not config.follow_sources
     assert (config.delay, config.retries, config.source_depth, config.max_pages) == (1.5, 7, 2, 321)
@@ -398,7 +400,7 @@ def test_attachment_checkbox_is_enabled_by_default_and_independent_of_images(app
     assert app.files.get() is True
     checkboxes = {widget['text']: widget for widget in app._input_widgets
                   if isinstance(widget, gui.ttk.Checkbutton)}
-    assert len(checkboxes) == 4
+    assert len(checkboxes) == 5
     checkboxes['이미지 저장'].invoke()
     assert app.read_config().download_images is False
     assert app.read_config().download_files is True
@@ -408,7 +410,8 @@ def test_attachment_checkbox_is_enabled_by_default_and_independent_of_images(app
     assert app.refresh.get() is False
     positions = {(widget.grid_info()['row'], widget.grid_info()['column'])
                  for widget in checkboxes.values()}
-    assert positions == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    assert positions == {(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)}
+    assert (app.prepare_button.grid_info()['row'], app.prepare_button.grid_info()['column']) == (2, 1)
 
 
 def test_advanced_attachment_limit_validates_and_apply_does_not_cover_fields(app, monkeypatch):
@@ -548,3 +551,72 @@ def test_premium_backup_disables_login_until_worker_finishes(app):
     app._handle_event({'kind': 'done', 'action': 'backup', 'status': 'success',
                        'message': '백업 완료', 'report': None})
     assert not app.login_button.instate(['disabled'])
+
+
+def test_preparation_without_address_preserves_saved_results_and_locks_controls(app, monkeypatch):
+    report = {'posts': {'success': 42}}
+    app.last_report = report
+    app.counts['success'].set('42')
+    app.run_summary.set('이전 백업 완료')
+    app.tabs.select(2)
+    app.library.query.set('검색 유지')
+    refreshes = []
+    monkeypatch.setattr(app.library, 'refresh', lambda: refreshes.append(True))
+    app.refresh.set(True)
+    app.prepare_button.invoke()
+    assert app.runner.starts == [('prepare-transcription', None, False)]
+    assert app.running
+    assert all(widget.instate(['disabled']) for widget in app._input_widgets + app._operation_buttons)
+    assert not app.stop_button.instate(['disabled'])
+    assert app.last_report is report and app.counts['success'].get() == '42'
+    assert app.run_summary.get() == '이전 백업 완료'
+    assert '외부로 전송하지 않고' in app.detail.get()
+    assert not app.config_path.exists() and not app.profile_store.path.exists()
+    app.stop()
+    assert app.runner.cancelled and app.stopping
+    assert app.stop_button.instate(['disabled'])
+    assert '준비 작업' in app.detail.get()
+    app._handle_event({'kind': 'done', 'action': 'prepare-transcription', 'status': 'interrupted',
+                       'message': '준비를 중단했습니다.', 'report': None})
+    assert not app.running and not app.prepare_button.instate(['disabled'])
+    assert app.last_report is report and app.counts['success'].get() == '42'
+    assert app.run_summary.get() == '이전 백업 완료'
+    assert app.tabs.index(app.tabs.select()) == 2
+    assert app.library.query.get() == '검색 유지'
+    assert not refreshes
+
+
+def test_transcription_checkbox_is_independent_and_persisted_with_profile(app, tmp_path):
+    app.blog.set('https://contents.premium.naver.com/owner/channel')
+    app.folder.set(str(tmp_path / 'premium'))
+    checkboxes = {widget['text']: widget for widget in app._input_widgets
+                  if isinstance(widget, gui.ttk.Checkbutton)}
+    assert app.videos.get() is True
+    checkboxes['영상 텍스트화'].invoke()
+    app.save_profile()
+    assert app.images.get() and app.files.get() and app.sources.get()
+    assert app.profile_store.list()[0].transcribe_videos is False
+    app.videos.set(True)
+    app.select_profile()
+    assert app.videos.get() is False
+    app.start('backup')
+    assert app.runner.starts[0][1].transcribe_videos is False
+    assert load_config(app.config_path).transcribe_videos is False
+
+
+@pytest.mark.parametrize('phase, fields, detail', [
+    ('transcribing', {'seconds': 30, 'total_seconds': 120}, '30 / 120초'),
+    ('video-download', {'bytes': 1048576, 'total_bytes': 4194304}, '1.0 / 4.0 MiB'),
+])
+def test_video_progress_does_not_replace_post_counts(app, phase, fields, detail):
+    app.counts['success'].set('42')
+    app.run_summary.set('이번 실행 · 글 42개 완료')
+    app._handle_event({'kind': 'progress', 'phase': phase, 'message': '영상 처리 중', **fields})
+    assert float(app.progress['value']) == 25
+    assert detail in app.detail.get()
+    assert app.counts['success'].get() == '42'
+    assert app.run_summary.get() == '이번 실행 · 글 42개 완료'
+    app.stopping = True
+    app.detail.set('중단 대기')
+    app._handle_event({'kind': 'progress', 'phase': phase, **fields})
+    assert app.detail.get() == '중단 대기'

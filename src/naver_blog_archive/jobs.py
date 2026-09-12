@@ -23,9 +23,9 @@ class JobRunner:
     def start(self, action: str, config: Config | None = None, *, refresh=False):
         if self.busy:
             raise RuntimeError('이미 작업을 실행하고 있습니다.')
-        if action not in ('backup', 'verify', 'status', 'doctor', 'reformat', 'login'):
+        if action not in ('backup', 'verify', 'status', 'doctor', 'reformat', 'login', 'prepare-transcription'):
             raise ValueError('지원하지 않는 작업입니다.')
-        if action != 'doctor' and config is None:
+        if action not in ('doctor', 'prepare-transcription') and config is None:
             raise ValueError('백업 설정이 필요합니다.')
         self.control = TaskControl(lambda event: self.events.put({'kind': 'progress', **event}))
         self._thread = Thread(target=self._work, args=(action, config, refresh, self.control),
@@ -47,6 +47,12 @@ class JobRunner:
                 control.emit('doctor', output.getvalue().strip())
                 status = 'success' if code == 0 else 'error'
                 message = '실행 환경이 준비되었습니다.' if code == 0 else '실행 환경을 확인하세요. 아래 실행 기록에 해결 방법이 표시됩니다.'
+            elif action == 'prepare-transcription':
+                from .transcription import prepare_transcription
+                control.check()
+                prepare_transcription(control=control)
+                status = 'success'
+                message = '로컬 음성 인식 준비가 끝났습니다. 영상 텍스트화를 켜고 백업 시작 / 이어받기를 누르세요.'
             elif action == 'login':
                 from .premium_auth import login
                 login(config, control=control)
@@ -82,7 +88,10 @@ class JobRunner:
                         message = '저장된 백업 상태를 불러왔습니다.'
         except KeyboardInterrupt as exc:
             report = getattr(exc, 'report', None)
-            status, message = 'interrupted', '중단했습니다. 같은 설정으로 백업하면 미완료 항목을 이어 처리합니다.'
+            status = 'interrupted'
+            message = ('음성 인식 준비를 중단했습니다. 음성 인식 준비 버튼으로 다시 실행할 수 있습니다.'
+                       if action == 'prepare-transcription'
+                       else '중단했습니다. 같은 설정으로 백업하면 미완료 항목을 이어 처리합니다.')
         except (Exception, SystemExit) as exc:
             status, message = 'error', f'{type(exc).__name__}: {exc}'
         self.events.put({'kind': 'done', 'action': action, 'status': status,

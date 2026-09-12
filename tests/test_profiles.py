@@ -18,7 +18,7 @@ def test_profiles_persist_distinct_blog_settings_and_update_existing_address(tmp
     path = tmp_path / 'blog_profiles.sqlite'
     store = ProfileStore(path)
     first = Config('first_blog', tmp_path / '첫 보관함', delay=1.2, retries=5, download_images=False,
-                   download_files=False, max_file_mb=250)
+                   download_files=False, max_file_mb=250, transcribe_videos=False)
     second = Config('second_blog', tmp_path / '다른 보관함', follow_sources=False, source_depth=2)
     store.save(first)
     store.save(second)
@@ -74,6 +74,7 @@ def test_old_saved_profile_gets_attachment_defaults_without_rewriting_database(t
     assert profiles[0].download_files is True
     assert profiles[0].max_file_mb == 100
     assert profiles[0].download_images is False
+    assert profiles[0].transcribe_videos is True
     assert path.read_bytes() == before
 
 

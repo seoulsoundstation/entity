@@ -28,5 +28,6 @@ if errorlevel 1 exit /b 1
 ".venv\Scripts\python.exe" -m playwright install chromium
 if errorlevel 1 exit /b 1
 if not exist config.toml copy /y config.example.toml config.toml >nul
+echo Optional local speech recognition: use the GUI preparation button or run prepare-transcription.
 ".venv\Scripts\python.exe" -m naver_blog_archive doctor
 exit /b %ERRORLEVEL%

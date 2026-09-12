@@ -1,6 +1,8 @@
 """Worker lifecycle tests: no browser, network access, or Tk event loop."""
 from queue import Empty
 from threading import Event, current_thread
+from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -191,6 +193,52 @@ def test_environment_diagnostics_need_no_blog_and_forward_console_output(monkeyp
     assert events[0]['message'] == 'Browser diagnostic details'
     assert done['status'] == status
     assert done['report'] is None
+
+
+def test_transcription_preparation_runs_without_config_off_caller_thread(monkeypatch):
+    caller = current_thread()
+
+    def prepare(*, control):
+        assert current_thread() is not caller
+        control.check()
+        control.emit('transcription-setup', '모델 준비 중')
+
+    monkeypatch.setitem(sys.modules, 'naver_blog_archive.transcription',
+                        SimpleNamespace(prepare_transcription=prepare))
+    runner = JobRunner()
+    runner.start('prepare-transcription')
+    events, done = finish(runner)
+    assert events[0]['message'] == '모델 준비 중'
+    assert done['status'] == 'success'
+    assert done['action'] == 'prepare-transcription'
+    assert done['report'] is None
+    assert '백업 시작 / 이어받기' in done['message']
+
+
+def test_transcription_preparation_can_be_cancelled_and_retried(monkeypatch):
+    entered = Event()
+
+    def prepare(*, control):
+        entered.set()
+        control.wait(5)
+
+    monkeypatch.setitem(sys.modules, 'naver_blog_archive.transcription',
+                        SimpleNamespace(prepare_transcription=prepare))
+    runner = JobRunner()
+    runner.start('prepare-transcription')
+    try:
+        assert entered.wait(2)
+    finally:
+        runner.cancel()
+    _, done = finish(runner)
+    assert done['status'] == 'interrupted'
+    assert '음성 인식 준비 버튼' in done['message']
+    assert done['report'] is None
+
+    monkeypatch.setitem(sys.modules, 'naver_blog_archive.transcription',
+                        SimpleNamespace(prepare_transcription=lambda *, control: control.check()))
+    runner.start('prepare-transcription')
+    assert finish(runner)[1]['status'] == 'success'
 
 
 @pytest.mark.parametrize('problems,failures,status', [([], [], 'success'), (['protected'], [], 'partial'),
