@@ -62,6 +62,10 @@ class ArchiveApp:
         self.last_report = None
         self._progress_phase = None
         self._input_widgets = []
+        self.options_expanded = False
+        self.option_summary = tk.StringVar()
+        self.backup_mode = tk.StringVar()
+        self.status_text = tk.StringVar(value='준비')
         self._advanced = asdict(Config('', self.config_path.parent / 'naver_blog_backup'))
         self.blog = tk.StringVar()
         self.folder = tk.StringVar(value=str(self.config_path.parent / 'naver_blog_backup'))
@@ -77,6 +81,9 @@ class ArchiveApp:
         self.run_summary = tk.StringVar(value='기본 백업: 기존 파일 확인 후 건너뛰기 · 새 글과 미완료 항목 저장')
         self.counts = {key: tk.StringVar(value='0') for key in ('success', 'partial', 'failed', 'pending')}
         self._build()
+        for variable in (self.images, self.files, self.videos, self.sources, self.refresh):
+            variable.trace_add('write', self._update_option_summary)
+        self._update_option_summary()
         if self.config_path.is_file():
             try:
                 self._apply_config(load_config(self.config_path))
@@ -95,7 +102,7 @@ class ArchiveApp:
     def _build(self):
         self.root.title('네이버 콘텐츠 보관함')
         width = min(1120, self.root.winfo_screenwidth() - 60)
-        height = min(860, self.root.winfo_screenheight() - 100)
+        height = min(820, self.root.winfo_screenheight() - 100)
         self.root.geometry(f'{width}x{height}+{max(0, (self.root.winfo_screenwidth() - width) // 2)}+30')
         self.root.minsize(min(1020, width), min(760, height))
         self.root.configure(bg=BG)
@@ -116,6 +123,13 @@ class ArchiveApp:
         style.map('Primary.TButton', background=[('disabled', '#b7cec7'), ('active', '#066950')],
                   foreground=[('disabled', 'white')])
         style.configure('TEntry', padding=7, fieldbackground='white')
+        style.configure('Quiet.TButton', padding=(10, 5), background='white', borderwidth=0)
+        style.map('Quiet.TButton', background=[('pressed', '#dcefe6'), ('active', '#edf5f1')])
+        style.configure('Tools.TMenubutton', padding=(14, 8), background='white', relief='flat')
+        style.configure('Stop.TButton', background='#fff0ed', foreground='#a43225', borderwidth=0)
+        style.map('Stop.TButton', background=[('active', '#ffe0da')], foreground=[('disabled', '#bc938d')])
+        style.configure('Badge.TLabel', background='#e3f1eb', foreground=GREEN,
+                        padding=(10, 4), font=('맑은 고딕', 9, 'bold'))
         style.configure('TCheckbutton', background='white', padding=(0, 5))
         style.configure('Horizontal.TProgressbar', troughcolor='#e7edf2', background=GREEN,
                         bordercolor='#e7edf2', lightcolor=GREEN, darkcolor=GREEN)
@@ -127,86 +141,142 @@ class ArchiveApp:
 
         shell = ttk.Frame(self.root, padding=20)
         shell.pack(fill='both', expand=True)
-        shell.columnconfigure(0, weight=3)
-        shell.columnconfigure(1, weight=2)
-        shell.rowconfigure(3, weight=1)
+        shell.columnconfigure(0, weight=4, minsize=570)
+        shell.columnconfigure(1, weight=3, minsize=360)
+        shell.rowconfigure(1, weight=1)
         header = ttk.Frame(shell)
-        header.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 12))
-        ttk.Label(header, text='네이버 콘텐츠 보관함', font=('맑은 고딕', 23, 'bold')).pack(side='left')
-        ttk.Label(header, text='내 PC에 차곡차곡', style='Muted.TLabel').pack(side='right', pady=(14, 0))
+        header.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 20))
+        heading = ttk.Frame(header)
+        heading.pack(side='left')
+        ttk.Label(heading, text='네이버 콘텐츠 보관함', font=('맑은 고딕', 21, 'bold')).pack(anchor='w')
+        ttk.Label(heading, text='주소를 선택하고, 내 PC에 이어서 보관하세요.', style='Muted.TLabel').pack(anchor='w', pady=(4, 0))
+        self.tools_button = ttk.Menubutton(header, text='설정 및 관리', style='Tools.TMenubutton')
+        self.tools_button.pack(side='right', anchor='n', pady=5)
+        self.tools_menu = tk.Menu(self.tools_button, tearoff=False, font=('맑은 고딕', 10),
+                                  background='white', foreground=INK,
+                                  activebackground='#e3f1eb', activeforeground=GREEN)
+        self.tools_button.configure(menu=self.tools_menu)
+        self._tool_entries = []
+        groups = [
+            ('백업 관리', [('저장 파일 검사', lambda: self.start('verify')),
+                       ('저장 결과 정리', lambda: self.start('reformat')),
+                       ('이전 결과 확인', lambda: self.start('status'))]),
+            ('설정', [('세부 설정', self.advanced_settings), ('설정 불러오기', self.load_settings),
+                    ('설정 저장', self.save_settings)]),
+            ('환경', [('음성 인식 준비', lambda: self.start('prepare-transcription')),
+                    ('환경 진단', lambda: self.start('doctor'))]),
+        ]
+        for index, (section, commands) in enumerate(groups):
+            if index:
+                self.tools_menu.add_separator()
+            self.tools_menu.add_command(label=section, state='disabled')
+            for label, command in commands:
+                self.tools_menu.add_command(label=label, command=lambda fn=command: self._run_idle(fn))
+                self._tool_entries.append(self.tools_menu.index('end'))
+        self._input_widgets.append(self.tools_button)
 
-        settings = ttk.Frame(shell, style='Card.TFrame', padding=14)
-        settings.grid(row=1, column=0, sticky='nsew', padx=(0, 14))
+        self.tabs = ttk.Notebook(shell, style=self.control_styles.notebook)
+        self.tabs.grid(row=1, column=0, columnspan=2, sticky='nsew')
+        backup_page = ttk.Frame(self.tabs, padding=(0, 14, 0, 0))
+        backup_page.columnconfigure(0, weight=4, minsize=570)
+        backup_page.columnconfigure(1, weight=3, minsize=360)
+        backup_page.rowconfigure(1, weight=1)
+        self.tabs.add(backup_page, text='백업')
+
+        settings = ttk.Frame(backup_page, style='Card.TFrame', padding=20)
+        settings.grid(row=0, column=0, sticky='nsew', padx=(0, 16), pady=(0, 16))
         settings.columnconfigure(1, weight=1)
-        ttk.Label(settings, text='01  백업 설정', style='Card.TLabel', font=('맑은 고딕', 12, 'bold')).grid(
-            row=0, column=0, columnspan=3, sticky='w', pady=(0, 12))
+        ttk.Label(settings, text='백업 대상', style='Card.TLabel', font=('맑은 고딕', 12, 'bold')).grid(
+            row=0, column=0, columnspan=3, sticky='w', pady=(0, 16))
         ttk.Label(settings, text='저장한 주소', style='Card.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 16))
         self.profile_box = ttk.Combobox(settings, textvariable=self.profile_choice, state='readonly')
         self.profile_box.grid(row=1, column=1, sticky='ew', padx=(0, 8), pady=(0, 7))
         self.profile_box.bind('<<ComboboxSelected>>', self.select_profile)
-        self.profile_button = ttk.Button(settings, text='현재 주소 저장', command=self.save_profile)
+        self.profile_button = ttk.Button(settings, text='주소 저장', style='Quiet.TButton', command=self.save_profile)
         self.profile_button.grid(row=1, column=2, sticky='ew', pady=(0, 7))
         self._input_widgets.append(self.profile_button)
-        ttk.Label(settings, text='블로그 / 채널 주소', style='Card.TLabel').grid(row=2, column=0, sticky='w', padx=(0, 16))
+        ttk.Label(settings, text='주소', style='Card.TLabel').grid(row=2, column=0, sticky='w', padx=(0, 16))
         self.blog_entry = ttk.Entry(settings, textvariable=self.blog)
         self.blog_entry.grid(row=2, column=1, columnspan=2, sticky='ew', pady=4)
         self._input_widgets.append(self.blog_entry)
-        ttk.Label(settings, text='블로그 ID 또는 네이버 프리미엄 채널 주소', style='CardMuted.TLabel').grid(
-            row=3, column=1, columnspan=2, sticky='w', pady=(0, 7))
+        self.login_row = ttk.Frame(settings, style='Card.TFrame')
+        self.login_row.grid(row=3, column=1, columnspan=2, sticky='ew', pady=(3, 7))
+        self.login_row.columnconfigure(0, weight=1)
+        ttk.Label(self.login_row, textvariable=self.login_note, style='CardMuted.TLabel', wraplength=300).grid(
+            row=0, column=0, sticky='w')
+        self.login_button = ttk.Button(self.login_row, text='네이버 로그인', style='Quiet.TButton',
+                                       command=lambda: self.start('login'), state='disabled')
+        self.login_button.grid(row=0, column=1, sticky='e', padx=(8, 0))
         ttk.Label(settings, text='저장 폴더', style='Card.TLabel').grid(row=4, column=0, sticky='w')
         folder_entry = ttk.Entry(settings, textvariable=self.folder)
         folder_entry.grid(row=4, column=1, sticky='ew', padx=(0, 8))
         self._input_widgets.append(folder_entry)
-        choose = ttk.Button(settings, text='폴더 선택', command=self.choose_folder)
+        choose = ttk.Button(settings, text='폴더 선택', style='Quiet.TButton', command=self.choose_folder)
         choose.grid(row=4, column=2, sticky='ew')
         self._input_widgets.append(choose)
-        options = ttk.Frame(settings, style='Card.TFrame')
-        options.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(7, 0))
+        option_header = ttk.Frame(settings, style='Card.TFrame')
+        option_header.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(14, 0))
+        option_header.columnconfigure(1, weight=1)
+        self.options_button = ttk.Button(option_header, text='백업 옵션', style='Quiet.TButton', command=self.toggle_options)
+        self.options_button.grid(row=0, column=0, sticky='w')
+        self._input_widgets.append(self.options_button)
+        ttk.Label(option_header, textvariable=self.option_summary, style='CardMuted.TLabel',
+                  wraplength=380).grid(row=0, column=1, sticky='e', padx=(10, 0))
+        self.options_window = tk.Toplevel(self.root)
+        self.options_window.withdraw()
+        self.options_window.title('백업 옵션')
+        self.options_window.resizable(False, False)
+        self.options_window.configure(bg='white')
+        self.options_window.protocol('WM_DELETE_WINDOW', self.close_options)
+        self.options_window.bind('<Escape>', self.close_options)
+        self.options_panel = options = ttk.Frame(self.options_window, style='Card.TFrame', padding=24)
+        options.grid(row=0, column=0, sticky='ew')
         for index, (label, variable) in enumerate([
                 ('이미지 저장', self.images), ('첨부파일 저장', self.files),
-                ('인용 원본 저장', self.sources), ('기존 글도 최신 내용으로 갱신', self.refresh),
-                ('영상 텍스트화', self.videos)]):
+                ('영상 텍스트화', self.videos), ('인용 원본 저장', self.sources),
+                ('기존 글도 최신 내용으로 갱신', self.refresh)]):
             widget = ttk.Checkbutton(options, text=label, variable=variable, style=self.control_styles.checkbutton)
-            widget.grid(row=index // 2, column=index % 2, sticky='w', padx=(0, 14))
+            widget.grid(row=index // 2, column=index % 2, columnspan=2 if index == 4 else 1,
+                        sticky='w', padx=(0, 18))
             self._input_widgets.append(widget)
-        self.prepare_button = ttk.Button(options, text='음성 인식 준비', command=lambda: self.start('prepare-transcription'))
-        self.prepare_button.grid(row=2, column=1, sticky='w', padx=(0, 14), pady=(3, 0))
+        self.prepare_button = ttk.Button(options, text='음성 인식 준비', style='Quiet.TButton',
+                                        command=lambda: self.start('prepare-transcription'))
+        self.prepare_button.grid(row=3, column=0, sticky='w', pady=(5, 0))
         self._input_widgets.append(self.prepare_button)
-        setting_actions = ttk.Frame(settings, style='Card.TFrame')
-        setting_actions.grid(row=6, column=0, columnspan=3, sticky='ew', pady=(7, 0))
-        for label, command in [('세부 설정', self.advanced_settings), ('설정 불러오기', self.load_settings), ('설정 저장', self.save_settings)]:
-            button = ttk.Button(setting_actions, text=label, command=command)
-            button.pack(side='left', padx=(0, 6))
-            self._input_widgets.append(button)
-        self.login_button = ttk.Button(setting_actions, text='네이버 로그인', command=lambda: self.start('login'), state='disabled')
-        self.login_button.pack(side='left')
-        ttk.Label(settings, textvariable=self.login_note, style='CardMuted.TLabel', wraplength=430).grid(
-            row=7, column=0, columnspan=3, sticky='w', pady=(9, 0))
+        ttk.Label(options, text='자막이 없는 영상에 사용합니다.', style='CardMuted.TLabel').grid(
+            row=3, column=1, sticky='w', padx=(8, 0), pady=(5, 0))
+        ttk.Separator(options).grid(row=4, column=0, columnspan=2, sticky='ew', pady=(16, 12))
+        ttk.Label(options, text='다음 백업에 적용됩니다.', style='CardMuted.TLabel').grid(row=5, column=0, sticky='w')
+        ttk.Button(options, text='완료', style='Primary.TButton', command=self.close_options).grid(row=5, column=1, sticky='e')
+        options.grid_remove()
+        self.mode_label = ttk.Label(settings, textvariable=self.backup_mode, style='CardMuted.TLabel')
+        self.mode_label.grid(row=7, column=0, columnspan=3, sticky='w', pady=(14, 7))
 
-        actions = ttk.Frame(shell)
-        actions.grid(row=2, column=0, columnspan=2, sticky='ew', pady=14)
+        actions = ttk.Frame(settings, style='Card.TFrame')
+        actions.grid(row=8, column=0, columnspan=3, sticky='ew')
+        actions.columnconfigure(0, weight=1)
         self.start_button = ttk.Button(actions, text='백업 시작 / 이어받기', style='Primary.TButton', command=lambda: self.start('backup'))
-        self.start_button.pack(side='left', padx=(0, 8))
-        self.stop_button = ttk.Button(actions, text='중단', command=self.stop, state='disabled')
-        self.stop_button.pack(side='left', padx=(0, 14))
+        self.start_button.grid(row=0, column=0, sticky='ew')
+        self.stop_button = ttk.Button(header, text='중단', style='Stop.TButton', command=self.stop, state='disabled')
+        self.header_status = ttk.Label(header, textvariable=self.status_text, style='Badge.TLabel')
         self._operation_buttons = [self.start_button]
-        for label, action in [('저장 결과 정리', 'reformat'), ('저장 파일 검사', 'verify'), ('이전 결과 확인', 'status'), ('환경 진단', 'doctor')]:
-            button = ttk.Button(actions, text=label, command=lambda value=action: self.start(value))
-            button.pack(side='left', padx=(0, 6))
-            self._operation_buttons.append(button)
-        ttk.Button(actions, text='결과 폴더 열기', command=self.show_folder).pack(side='right')
 
-        progress = ttk.Frame(shell, style='Card.TFrame', padding=16)
-        progress.grid(row=1, column=1, sticky='nsew')
+        progress = ttk.Frame(backup_page, style='Card.TFrame', padding=20)
+        progress.grid(row=0, column=1, sticky='nsew', pady=(0, 16))
         progress.columnconfigure(0, weight=1)
-        ttk.Label(progress, text='02  진행 상태', style='Card.TLabel', font=('맑은 고딕', 12, 'bold')).grid(row=0, column=0, sticky='w')
-        ttk.Label(progress, textvariable=self.phase, style='Card.TLabel', font=('맑은 고딕', 12, 'bold'), wraplength=340).grid(row=1, column=0, sticky='w', pady=(12, 0))
+        progress.rowconfigure(3, weight=1)
+        progress_heading = ttk.Frame(progress, style='Card.TFrame')
+        progress_heading.grid(row=0, column=0, sticky='ew')
+        ttk.Label(progress_heading, text='진행 상태', style='Card.TLabel', font=('맑은 고딕', 12, 'bold')).pack(side='left')
+        self.status_badge = ttk.Label(progress_heading, textvariable=self.status_text, style='Badge.TLabel')
+        self.status_badge.pack(side='right')
+        ttk.Label(progress, textvariable=self.phase, style='Card.TLabel', font=('맑은 고딕', 11, 'bold'), wraplength=330).grid(row=1, column=0, sticky='w', pady=(16, 0))
         self.progress = ttk.Progressbar(progress, mode='determinate', maximum=100)
         self.progress.grid(row=2, column=0, sticky='ew', pady=(10, 8))
-        ttk.Label(progress, textvariable=self.detail, style='CardMuted.TLabel', wraplength=340).grid(row=3, column=0, sticky='w')
+        ttk.Label(progress, textvariable=self.detail, style='CardMuted.TLabel', wraplength=330).grid(row=3, column=0, sticky='nw')
         counters = ttk.Frame(progress, style='Card.TFrame')
         counters.grid(row=4, column=0, sticky='ew', pady=(12, 0))
-        for column, (key, label) in enumerate([('success', '완료'), ('partial', '부분 완료'), ('failed', '실패'), ('pending', '대기 / 진행')]):
+        for column, (key, label) in enumerate([('success', '완료'), ('partial', '부분 완료'), ('failed', '실패'), ('pending', '대기')]):
             counters.columnconfigure(column % 2, weight=1)
             cell = ttk.Frame(counters, style='Card.TFrame')
             cell.grid(row=column // 2, column=column % 2, sticky='ew', pady=4)
@@ -214,19 +284,20 @@ class ArchiveApp:
             ttk.Label(cell, textvariable=self.counts[key], style='Card.TLabel', font=('맑은 고딕', 17, 'bold')).pack(side='left', padx=12)
         ttk.Label(progress, textvariable=self.run_summary, style='CardMuted.TLabel', wraplength=340).grid(
             row=5, column=0, sticky='w', pady=(8, 0))
+        self.folder_button = ttk.Button(progress, text='결과 폴더 열기', style='Quiet.TButton', command=self.show_folder)
+        self.folder_button.grid(row=6, column=0, sticky='e', pady=(12, 0))
 
-        self.tabs = ttk.Notebook(shell, style=self.control_styles.notebook)
-        self.tabs.grid(row=3, column=0, columnspan=2, sticky='nsew')
-        logs = ttk.Frame(self.tabs, style='Card.TFrame')
-        logs.rowconfigure(0, weight=1)
+        logs = ttk.Frame(backup_page, style='Card.TFrame')
+        logs.grid(row=1, column=0, columnspan=2, sticky='nsew')
+        logs.rowconfigure(1, weight=1)
         logs.columnconfigure(0, weight=1)
+        ttk.Label(logs, text='실행 기록', style='CardMuted.TLabel').grid(row=0, column=0, sticky='w', padx=12, pady=(9, 3))
         self.log = tk.Text(logs, height=7, wrap='word', relief='flat', padx=12, pady=10,
                            bg='white', fg=INK, state='disabled', font=('맑은 고딕', 10))
-        self.log.grid(row=0, column=0, sticky='nsew')
+        self.log.grid(row=1, column=0, sticky='nsew')
         log_scroll = ttk.Scrollbar(logs, command=self.log.yview)
-        log_scroll.grid(row=0, column=1, sticky='ns')
+        log_scroll.grid(row=1, column=1, sticky='ns')
         self.log.configure(yscrollcommand=log_scroll.set)
-        self.tabs.add(logs, text='실행 기록')
         issues = ttk.Frame(self.tabs, style='Card.TFrame')
         issues.rowconfigure(0, weight=1)
         issues.columnconfigure(0, weight=1)
@@ -243,7 +314,46 @@ class ArchiveApp:
         self.library = LibraryPane(self.tabs, self.read_config)
         self.tabs.add(self.library, text='저장 글 검색')
         self.tabs.bind('<<NotebookTabChanged>>', self._tab_changed)
-        ttk.Label(shell, textvariable=self.settings_note, style='Muted.TLabel', wraplength=1040).grid(row=4, column=0, columnspan=2, sticky='w', pady=(10, 0))
+        ttk.Label(shell, text='주소·폴더·옵션은 백업 시작 시 자동으로 저장됩니다.', style='Muted.TLabel').grid(
+            row=2, column=0, columnspan=2, sticky='w', pady=(12, 0))
+
+    def _run_idle(self, command):
+        if not self.running:
+            command()
+
+    def toggle_options(self):
+        if self.options_expanded:
+            self.close_options()
+            return
+        if self.running:
+            return
+        self.options_expanded = True
+        self.options_panel.grid()
+        # Bind the owner only after the main window has been mapped. Windows
+        # can otherwise retain a hidden transient created during startup.
+        self.options_window.transient(self.root)
+        self.options_window.update_idletasks()
+        x = max(0, min(self.root.winfo_rootx() + 40,
+                       self.root.winfo_screenwidth() - self.options_window.winfo_reqwidth() - 20))
+        y = max(0, min(self.options_button.winfo_rooty(),
+                       self.root.winfo_screenheight() - self.options_window.winfo_reqheight() - 60))
+        self.options_window.geometry(f'+{x}+{y}')
+        self.options_window.deiconify()
+        self.options_window.grab_set()
+        self.options_window.focus_set()
+
+    def close_options(self, _event=None):
+        self.options_window.grab_release()
+        self.options_window.withdraw()
+        self.options_panel.grid_remove()
+        self.options_expanded = False
+
+    def _update_option_summary(self, *_args):
+        enabled = [label for label, value in [('이미지', self.images), ('첨부파일', self.files),
+                   ('영상 텍스트', self.videos), ('인용 원본', self.sources)] if value.get()]
+        self.option_summary.set(' · '.join(enabled) if enabled else '본문만 저장')
+        self.backup_mode.set('전체 원문 갱신 켜짐' if self.refresh.get() else '새 글과 미완료 항목만 저장 · 기존 파일 재사용')
+        self.mode_label.configure(foreground='#9b5a13' if self.refresh.get() else MUTED)
 
     def _update_settings_note(self):
         self.settings_note.set(f'설정: {self.config_path}  ·  블로그·채널마다 별도 저장 폴더를 사용해 주세요.')
@@ -254,8 +364,11 @@ class ArchiveApp:
         except ValueError:
             premium = False
         self.login_button.configure(state='normal' if premium and not self.running else 'disabled')
-        self.login_note.set('전용 브라우저에서 구독 계정으로 로그인한 뒤 백업하세요.' if premium
-                            else '블로그·채널별 폴더·옵션은 백업 시작 시 저장합니다.')
+        self.login_note.set('전용 브라우저에서 구독 계정으로 로그인하세요.' if premium else '')
+        if premium:
+            self.login_row.grid()
+        else:
+            self.login_row.grid_remove()
 
     def _apply_config(self, config):
         self._advanced = asdict(config)
@@ -300,6 +413,8 @@ class ArchiveApp:
         self._show_counts({})
         self.issues.delete(*self.issues.get_children())
         self.tabs.tab(1, text='확인할 항목 (0)')
+        self.status_text.set('준비')
+        self.status_badge.configure(background='#e3f1eb', foreground=GREEN)
         self.phase.set(f'{_source_label(config.blog_id)} · 백업 준비')
         self.detail.set('저장한 폴더와 옵션을 불러왔습니다. 백업을 시작하면 기존 파일을 확인하고 이어 처리합니다.')
         self.run_summary.set('기본 백업: 기존 파일 확인 후 건너뛰기 · 새 글과 미완료 항목 저장')
@@ -387,12 +502,29 @@ class ArchiveApp:
         dialog.grab_set()
 
     def _set_busy(self, busy):
+        if busy and self.options_expanded:
+            self.close_options()
         self.running = busy
         self.stopping = False
         for widget in self._input_widgets + self._operation_buttons:
             widget.configure(state='disabled' if busy else 'normal')
         self.profile_box.configure(state='disabled' if busy else 'readonly')
+        for index in self._tool_entries:
+            self.tools_menu.entryconfigure(index, state='disabled' if busy else 'normal')
         self.stop_button.configure(state='normal' if busy and self.current_action != 'doctor' else 'disabled')
+        if busy and self.current_action != 'doctor':
+            self.stop_button.pack(side='right', anchor='n', padx=(10, 12), pady=5)
+        else:
+            self.stop_button.pack_forget()
+        if busy:
+            self.header_status.pack(side='right', anchor='n', padx=(12, 0), pady=12)
+        else:
+            self.header_status.pack_forget()
+        self.status_text.set('진행 중' if busy else '준비')
+        self.status_badge.configure(background='#e8f0fb' if busy else '#e3f1eb',
+                                    foreground='#285b9e' if busy else GREEN)
+        self.start_button.configure(text=('백업 진행 중' if self.current_action == 'backup' else '작업 진행 중')
+                                    if busy else '백업 시작 / 이어받기')
         self._update_login_button()
 
     def start(self, action):
@@ -434,6 +566,8 @@ class ArchiveApp:
             return
         self.runner.cancel()
         self.stopping = True
+        self.status_text.set('중단 중')
+        self.status_badge.configure(background='#fff1df', foreground='#965b14')
         self.stop_button.configure(state='disabled')
         self.phase.set('중단 요청을 처리하고 있습니다')
         self.detail.set('진행 중인 네트워크 요청은 설정한 제한 시간까지 기다릴 수 있습니다. 창을 닫지 말고 잠시 기다려 주세요.')
@@ -515,6 +649,11 @@ class ArchiveApp:
             self.progress.stop()
             self.progress.configure(mode='determinate', value=100 if event['status'] == 'success' else 0)
             self._set_busy(False)
+            self.status_text.set(STATUS_NAMES.get(event['status'], event['status']))
+            if event['status'] in ('partial', 'interrupted'):
+                self.status_badge.configure(background='#fff1df', foreground='#965b14')
+            elif event['status'] in ('error', 'failed'):
+                self.status_badge.configure(background='#fff0ed', foreground='#a43225')
             self.phase.set(f'{ACTION_NAMES[event["action"]]} · {STATUS_NAMES.get(event["status"], event["status"])}')
             self.detail.set(event['message'])
             self._log(event['message'])

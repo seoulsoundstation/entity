@@ -92,6 +92,10 @@ def test_backup_autosaves_then_locks_settings_until_completion(app):
     assert app.running
     assert all(widget.instate(['disabled']) for widget in app._input_widgets + app._operation_buttons)
     assert app.profile_box.instate(['disabled'])
+    assert all(app.tools_menu.entrycget(index, 'state') == 'disabled' for index in app._tool_entries)
+    for index in app._tool_entries:
+        app.tools_menu.invoke(index)
+    assert len(app.runner.starts) == 1
     assert not app.stop_button.instate(['disabled'])
     app.start('verify')
     assert len(app.runner.starts) == 1
@@ -127,7 +131,9 @@ def test_runner_start_failure_is_visible_and_does_not_lock_form(app, monkeypatch
 @pytest.mark.parametrize('action', ['verify', 'status', 'reformat'])
 def test_inspection_uses_current_inputs_without_autosaving(app, action):
     set_valid_inputs(app)
-    app.start(action)
+    label = {'verify': '저장 파일 검사', 'status': '이전 결과 확인', 'reformat': '저장 결과 정리'}[action]
+    index = next(index for index in app._tool_entries if app.tools_menu.entrycget(index, 'label') == label)
+    app.tools_menu.invoke(index)
     assert app.runner.starts[0][0] == action
     assert app.runner.starts[0][1].blog_id == 'demo_blog'
     assert not app.config_path.exists()
@@ -136,7 +142,8 @@ def test_inspection_uses_current_inputs_without_autosaving(app, action):
 def test_diagnostics_work_before_blog_setup_and_keep_previous_report(app):
     report = {'posts': {'success': 9}}
     app._show_report(report)
-    app.start('doctor')
+    index = next(index for index in app._tool_entries if app.tools_menu.entrycget(index, 'label') == '환경 진단')
+    app.tools_menu.invoke(index)
     assert app.runner.starts == [('doctor', None, False)]
     assert app.running
     assert app.stop_button.instate(['disabled'])
@@ -340,6 +347,8 @@ def test_profile_selection_clears_previous_blog_results_and_refreshes_visible_li
     app._show_report({'posts': {'success': 42}, 'failures': [
         {'blog_id': 'old_blog', 'post_id': '123', 'status': 'failed', 'error': 'old error'},
     ]})
+    app.status_text.set('실패')
+    app.status_badge.configure(background='#fbe9e7', foreground='#b33a2e')
     refreshes = []
     monkeypatch.setattr(app.library, 'refresh', lambda: refreshes.append(app.read_config()))
     app.tabs.select(2)
@@ -348,6 +357,8 @@ def test_profile_selection_clears_previous_blog_results_and_refreshes_visible_li
     assert app.last_report is None
     assert not app.issues.get_children()
     assert app.counts['success'].get() == '0'
+    assert app.status_text.get() == '준비'
+    assert str(app.status_badge.cget('foreground')) == gui.GREEN
     assert app.tabs.index(app.tabs.select()) == 2
     assert refreshes == [config]
 
@@ -397,6 +408,17 @@ def test_run_summary_distinguishes_new_saves_from_reused_archive_files(app):
 
 def test_attachment_checkbox_is_enabled_by_default_and_independent_of_images(app):
     set_valid_inputs(app)
+    app.root.attributes('-alpha', 0.0)
+    app.options_window.attributes('-alpha', 0.0)
+    app.root.deiconify()
+    app.root.update()
+    tab_position = app.tabs.winfo_rooty()
+    assert app.options_panel.winfo_manager() == ''
+    app.options_button.invoke()
+    app.root.update()
+    assert app.options_panel.winfo_manager() == 'grid'
+    assert app.options_window.winfo_ismapped()
+    assert app.tabs.winfo_rooty() == tab_position
     assert app.files.get() is True
     checkboxes = {widget['text']: widget for widget in app._input_widgets
                   if isinstance(widget, gui.ttk.Checkbutton)}
@@ -408,10 +430,11 @@ def test_attachment_checkbox_is_enabled_by_default_and_independent_of_images(app
     assert app.read_config().download_files is False
     assert app.sources.get() is True
     assert app.refresh.get() is False
-    positions = {(widget.grid_info()['row'], widget.grid_info()['column'])
-                 for widget in checkboxes.values()}
-    assert positions == {(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)}
-    assert (app.prepare_button.grid_info()['row'], app.prepare_button.grid_info()['column']) == (2, 1)
+    assert '이미지' not in app.option_summary.get() and '첨부파일' not in app.option_summary.get()
+    app.refresh.set(True)
+    app.options_button.invoke()
+    assert app.options_panel.winfo_manager() == ''
+    assert '전체 원문 갱신' in app.backup_mode.get()
 
 
 def test_advanced_attachment_limit_validates_and_apply_does_not_cover_fields(app, monkeypatch):
@@ -424,7 +447,8 @@ def test_advanced_attachment_limit_validates_and_apply_does_not_cover_fields(app
 
     monkeypatch.setattr(gui.tk, 'Toplevel', hidden_dialog)
     app.advanced_settings()
-    dialog = next(child for child in app.root.winfo_children() if isinstance(child, create_dialog))
+    dialog = next(child for child in app.root.winfo_children()
+                  if isinstance(child, create_dialog) and child.title() == '세부 설정')
     form = dialog.winfo_children()[0]
     file_label = next(child for child in form.winfo_children()
                       if isinstance(child, gui.ttk.Label) and child['text'].startswith('첨부파일 최대 크기'))
@@ -563,7 +587,9 @@ def test_preparation_without_address_preserves_saved_results_and_locks_controls(
     refreshes = []
     monkeypatch.setattr(app.library, 'refresh', lambda: refreshes.append(True))
     app.refresh.set(True)
+    app.toggle_options()
     app.prepare_button.invoke()
+    assert not app.options_expanded
     assert app.runner.starts == [('prepare-transcription', None, False)]
     assert app.running
     assert all(widget.instate(['disabled']) for widget in app._input_widgets + app._operation_buttons)

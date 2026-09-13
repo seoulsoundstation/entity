@@ -53,11 +53,14 @@ class LibraryPane(ttk.Frame):
         table.grid(row=2, column=0, sticky='nsew')
         table.columnconfigure(0, weight=1)
         table.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(table, columns=('id', 'title', 'blog', 'status'), show='headings', height=6,
-                                selectmode='browse')
-        for key, label, width in [('id', '보관 ID', 295), ('title', '제목', 350), ('blog', '블로그 / 채널', 150), ('status', '상태', 85)]:
+        self.tree = ttk.Treeview(table, columns=('id', 'title', 'blog', 'status'),
+                                displaycolumns=('title', 'status', 'blog', 'id'),
+                                show='headings', height=6, selectmode='browse')
+        for key, label, width in [('title', '제목', 460), ('status', '상태', 90),
+                                  ('blog', '블로그 / 채널', 180), ('id', '보관 ID', 190)]:
             self.tree.heading(key, text=label)
-            self.tree.column(key, width=width, minwidth=70, stretch=key == 'title')
+            self.tree.column(key, width=width, minwidth=220 if key == 'title' else 70,
+                             stretch=key == 'title')
         self.tree.grid(row=0, column=0, sticky='nsew')
         scroll = ttk.Scrollbar(table, command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky='ns')
@@ -67,11 +70,15 @@ class LibraryPane(ttk.Frame):
         self.tree.bind('<Double-1>', lambda _event: self.show_details())
         footer = ttk.Frame(self, style='Card.TFrame')
         footer.grid(row=3, column=0, sticky='ew', pady=(8, 0))
-        ttk.Button(footer, text='글 정보', command=self.show_details).pack(side='left', padx=(0, 6))
         self.preview_button = ttk.Button(footer, text='사진과 함께 읽기', command=self.preview_selected)
         self.preview_button.pack(side='left', padx=(0, 6))
         ttk.Button(footer, text='저장 파일 열기', command=self.open_selected).pack(side='left', padx=(0, 6))
-        ttk.Button(footer, text='ID 복사', command=self.copy_id).pack(side='left')
+        self.more_button = ttk.Menubutton(footer, text='더보기 ▾')
+        self.more_menu = tk.Menu(self.more_button, tearoff=False)
+        self.more_menu.add_command(label='글 정보', command=self.show_details)
+        self.more_menu.add_command(label='ID 복사', command=self.copy_id)
+        self.more_button.configure(menu=self.more_menu)
+        self.more_button.pack(side='left')
         self.next_button = ttk.Button(footer, text='다음 ›', command=lambda: self.change_page(1), state='disabled')
         self.next_button.pack(side='right')
         ttk.Label(footer, textvariable=self.page_note, style='CardMuted.TLabel').pack(side='right', padx=12)

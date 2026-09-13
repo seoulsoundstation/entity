@@ -239,12 +239,16 @@ def test_file_open_rejects_existing_non_markdown_file(pane, monkeypatch):
 def test_copy_id_and_post_details_use_selected_archive_record(pane, monkeypatch):
     show_result(pane, [row(status='partial')])
     select_first(pane)
+    selected = pane.tree.selection()[0]
+    assert tuple(pane.tree['displaycolumns']) == ('title', 'status', 'blog', 'id')
+    assert pane.tree.set(selected, 'title') == 'Saved post 1'
+    assert pane.tree.set(selected, 'status') == '부분 완료'
     clipboard = []
     monkeypatch.setattr(pane, 'clipboard_clear', clipboard.clear)
     monkeypatch.setattr(pane, 'clipboard_append', clipboard.append)
-    pane.copy_id()
+    pane.more_menu.invoke('ID 복사')
     assert clipboard == ['archive-1']
-    pane.show_details()
+    pane.more_menu.invoke('글 정보')
     title, details = pane.test_dialogs[-1]
     assert title == '저장 글 정보'
     assert all(value in details for value in ('archive-1', '1001', 'demo_blog', '부분 완료', '2026-08-01', 'posts/1.md'))
