@@ -83,7 +83,8 @@ def test_real_player_xml_resolves_captions_and_smallest_muxed_mp4():
     client = Client()
     result = resolve_media(client, BLOG, POST)
     assert result == {'video_id': VID, 'captions': [{'url': CAPTION, 'language': 'ko-KR', 'format': 'text/vtt', 'automatic': True}],
-                      'audio_url': None, 'media_url': CDN + 'small.mp4', 'duration': 929.109}
+                      'audio_url': None, 'media_url': CDN + 'small.mp4', 'video_url': CDN + 'large.mp4',
+                      'duration': 929.109}
     assert client.calls[1][0] == PLAYBACK_ENDPOINT + VID
     assert client.calls[1][1]['params'] == {'key': 'TEST_ONLY_KEY', 'sid': '2054', 'meta': 'Y', 'devt': 'pc'}
     assert all(call[1]['allow_redirects'] is False for call in client.calls)

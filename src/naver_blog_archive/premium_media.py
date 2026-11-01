@@ -116,7 +116,7 @@ def _parse_playback(xml: str, video_id: str) -> dict:
     for element in root.iter():
         if element.tag.rsplit('}', 1)[-1].lower() in (
                 'contentprotection', 'drm', 'license', 'licenserequestinfo', 'encryption'):
-            raise PremiumMediaError('DRM으로 보호된 영상은 텍스트화할 수 없습니다.')
+            raise PremiumMediaError('DRM으로 보호된 영상은 텍스트화하거나 저장할 수 없습니다.')
 
     captions = []
     for group in root.findall('.//n:SubtitleSet', _NS):
@@ -154,9 +154,14 @@ def _parse_playback(xml: str, video_id: str) -> dict:
                 captions.append({'url': url, 'language': representation.get('lang') or group.get('lang', ''),
                                  'format': mime, 'automatic': False})
     captions.sort(key=lambda caption: (not caption['language'].lower().startswith('ko'), caption['automatic']))
+    # Unknown bandwidth ranks last for speech input and must not win "best".
+    ranked = [candidate for candidate in media if math.isfinite(candidate[0])] or media
     result = {'video_id': video_id, 'captions': captions,
               'audio_url': min(audio)[1] if audio else None,
               'media_url': min(media)[1] if media else None,
+              # The archived copy keeps the best muxed MP4; speech recognition
+              # above only needs the smallest file with an audio track.
+              'video_url': max(ranked)[1] if ranked else None,
               'duration': _duration(root.get('mediaPresentationDuration'))}
     if not captions and not audio and not media:
         raise PremiumMediaError('텍스트화할 자막이나 지원되는 음성·영상 파일이 제공되지 않습니다.')

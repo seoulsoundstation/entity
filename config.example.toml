@@ -7,6 +7,8 @@ download_files = true
 # 프리미엄 영상을 자막 우선, 자막이 없으면 로컬 음성 인식으로 텍스트화합니다.
 # 최초 음성 인식은 GUI의 '음성 인식 준비' 또는 prepare-transcription 명령으로 준비하세요.
 transcribe_videos = true
+# 프리미엄 영상의 원본 MP4(제공되는 최고 화질)를 백업 폴더에 보관합니다. 용량이 커서 기본은 꺼져 있습니다.
+download_videos = false
 follow_sources = true
 
 # 상대 out_dir는 이 설정 파일 위치를 기준으로 해석합니다.
@@ -18,4 +20,6 @@ timeout = 30
 max_image_mb = 30
 # 첨부파일 하나당 최대 크기 (MiB, 1~2048). 정상 저장된 파일은 다시 사용합니다.
 max_file_mb = 100
+# 동영상 파일 하나당 최대 크기 (MiB, 1~20480). 제한을 넘는 영상은 저장하지 않습니다.
+max_video_mb = 2048
 max_pages = 10000

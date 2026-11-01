@@ -72,6 +72,7 @@ class ArchiveApp:
         self.images = tk.BooleanVar(value=True)
         self.files = tk.BooleanVar(value=True)
         self.videos = tk.BooleanVar(value=True)
+        self.video_files = tk.BooleanVar(value=False)
         self.sources = tk.BooleanVar(value=True)
         self.refresh = tk.BooleanVar(value=False)
         self.login_note = tk.StringVar()
@@ -81,7 +82,7 @@ class ArchiveApp:
         self.run_summary = tk.StringVar(value='기본 백업: 기존 파일 확인 후 건너뛰기 · 새 글과 미완료 항목 저장')
         self.counts = {key: tk.StringVar(value='0') for key in ('success', 'partial', 'failed', 'pending')}
         self._build()
-        for variable in (self.images, self.files, self.videos, self.sources, self.refresh):
+        for variable in (self.images, self.files, self.videos, self.video_files, self.sources, self.refresh):
             variable.trace_add('write', self._update_option_summary)
         self._update_option_summary()
         if self.config_path.is_file():
@@ -233,10 +234,10 @@ class ArchiveApp:
         options.grid(row=0, column=0, sticky='ew')
         for index, (label, variable) in enumerate([
                 ('이미지 저장', self.images), ('첨부파일 저장', self.files),
-                ('영상 텍스트화', self.videos), ('인용 원본 저장', self.sources),
-                ('기존 글도 최신 내용으로 갱신', self.refresh)]):
+                ('영상 텍스트화', self.videos), ('동영상 파일 저장', self.video_files),
+                ('인용 원본 저장', self.sources), ('기존 글도 최신 내용으로 갱신', self.refresh)]):
             widget = ttk.Checkbutton(options, text=label, variable=variable, style=self.control_styles.checkbutton)
-            widget.grid(row=index // 2, column=index % 2, columnspan=2 if index == 4 else 1,
+            widget.grid(row=index // 2, column=index % 2, columnspan=2 if index == 5 else 1,
                         sticky='w', padx=(0, 18))
             self._input_widgets.append(widget)
         self.prepare_button = ttk.Button(options, text='음성 인식 준비', style='Quiet.TButton',
@@ -350,7 +351,8 @@ class ArchiveApp:
 
     def _update_option_summary(self, *_args):
         enabled = [label for label, value in [('이미지', self.images), ('첨부파일', self.files),
-                   ('영상 텍스트', self.videos), ('인용 원본', self.sources)] if value.get()]
+                   ('영상 텍스트', self.videos), ('동영상 파일', self.video_files),
+                   ('인용 원본', self.sources)] if value.get()]
         self.option_summary.set(' · '.join(enabled) if enabled else '본문만 저장')
         self.backup_mode.set('전체 원문 갱신 켜짐' if self.refresh.get() else '새 글과 미완료 항목만 저장 · 기존 파일 재사용')
         self.mode_label.configure(foreground='#9b5a13' if self.refresh.get() else MUTED)
@@ -377,6 +379,7 @@ class ArchiveApp:
         self.images.set(config.download_images)
         self.files.set(config.download_files)
         self.videos.set(config.transcribe_videos)
+        self.video_files.set(config.download_videos)
         self.sources.set(config.follow_sources)
 
     def _reload_profiles(self):
@@ -430,7 +433,8 @@ class ArchiveApp:
         values = dict(self._advanced)
         values.update(blog_id=normalize_blog_id(self.blog.get()), out_dir=self.folder.get().strip(),
                       download_images=self.images.get(), follow_sources=self.sources.get(),
-                      download_files=self.files.get(), transcribe_videos=self.videos.get())
+                      download_files=self.files.get(), transcribe_videos=self.videos.get(),
+                      download_videos=self.video_files.get())
         return config_from_mapping(values, base_dir=self.config_path.parent)
 
     def choose_folder(self):
@@ -476,6 +480,7 @@ class ArchiveApp:
                  ('retries', '최대 시도 횟수 (1~10)', int), ('source_depth', '인용 원본 추적 깊이 (0~3)', int),
                  ('max_image_mb', '이미지 최대 크기 (MiB, 1~500)', int),
                  ('max_file_mb', '첨부파일 최대 크기 (MiB, 1~2048)', int),
+                 ('max_video_mb', '동영상 파일 최대 크기 (MiB, 1~20480)', int),
                  ('max_pages', '목록 페이지 상한 (1~100000)', int)]
         for row, (key, label, converter) in enumerate(specs, 1):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky='w', padx=(0, 24), pady=6)
@@ -674,12 +679,12 @@ class ArchiveApp:
         if 'run_counts' in event:
             self._show_run_counts(event['run_counts'])
         phase = event.get('phase')
-        if phase != self._progress_phase and phase in ('starting', 'listing', 'linking', 'doctor', 'transcription-setup', 'video-download', 'transcribing'):
+        if phase != self._progress_phase and phase in ('starting', 'listing', 'linking', 'doctor', 'transcription-setup', 'video-download', 'video-save', 'transcribing'):
             self.progress.stop()
             self.progress.configure(mode='indeterminate', value=0)
             self.progress.start(12)
         self._progress_phase = phase
-        if phase in ('transcribing', 'video-download'):
+        if phase in ('transcribing', 'video-download', 'video-save'):
             current_key, total_key = ('seconds', 'total_seconds') if phase == 'transcribing' else ('bytes', 'total_bytes')
             current, total = event.get(current_key), event.get(total_key)
             if isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
@@ -688,6 +693,8 @@ class ArchiveApp:
                 if not self.stopping:
                     if phase == 'transcribing':
                         self.detail.set(f'로컬 음성 인식 · {current:,.0f} / {total:,.0f}초 처리 · 영상·음성 외부 전송 없음')
+                    elif phase == 'video-save':
+                        self.detail.set(f'동영상 파일 저장 · {current / 1048576:,.1f} / {total / 1048576:,.1f} MiB')
                     else:
                         self.detail.set(f'텍스트 변환용 임시 영상 다운로드 · {current / 1048576:,.1f} / {total / 1048576:,.1f} MiB')
             return

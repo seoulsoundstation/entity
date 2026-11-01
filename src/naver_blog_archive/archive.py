@@ -22,7 +22,8 @@ from .note_paths import migrate_note_names, recover_note_moves, titled_path
 from .parser import compose, extract_post, md_link
 from .progress import OperationCancelled, TaskControl
 from .state import State
-from .videos import transcript_complete, transcribe_video, video_errors, video_markdown
+from .videos import (save_video, saved_video, transcript_complete, transcribe_video, video_asset_key,
+                     video_errors, video_file_error, video_markdown)
 
 
 def active(config: Config, row) -> bool:
@@ -76,6 +77,8 @@ def active_asset_kinds(config: Config, rows) -> dict[str, str]:
             result.update((image['url'], 'image') for image in document['images'])
         if config.download_files:
             result.update((file_asset_key(file), 'file') for file in document.get('files', []))
+        if config.download_videos and document.get('content_type') == 'video':
+            result[video_asset_key(document)] = 'video'
     return result
 
 
@@ -166,10 +169,19 @@ def write_note(config: Config, state: State, row, content: bytes):
 def format_note(config: Config, state: State, row, download=None, file_download=None):
     document = json.loads(row['document'])
     replacements, errors, image_targets = {}, video_errors(config, document), {}
-    if document.get('content_type') == 'video':
-        document['markdown'] += '\n\n' + video_markdown(config, document)
     relative = row['path'] or titled_path(config, row)
     base = inside(config.out_dir, relative).parent
+    if document.get('content_type') == 'video':
+        if config.download_videos:
+            local = saved_video(config, state, document)
+            if local:
+                target = quote(Path(os.path.relpath(inside(config.out_dir, local), base)).as_posix(), safe='/')
+                document['markdown'] += '\n\n' + md_link('동영상 파일: ' + Path(local).name, target)
+            else:
+                error = video_file_error(config, state, document)
+                errors.append(error)
+                document['markdown'] += '\n\n' + error
+        document['markdown'] += '\n\n' + video_markdown(config, document)
     for image in document['images']:
         local = None
         if config.download_images:
@@ -292,6 +304,10 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
     needed_assets = active_asset_kinds(config, rows)
     file_names = {file_asset_key(file): file['name'] for row in rows if row['document']
                   for file in json.loads(row['document']).get('files', [])}
+    file_names.update((video_asset_key(document), document['title']) for document in
+                      (json.loads(row['document']) for row in rows if row['document'])
+                      if document.get('content_type') == 'video')
+    labels = {'file': '첨부파일', 'video': '동영상 파일'}
     for asset in state.db.execute('SELECT * FROM assets').fetchall():
         control.check()
         if asset['url'] not in needed_assets:
@@ -304,7 +320,7 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
         except (OSError, ValueError):
             good = False
         if not good:
-            label = '첨부파일' if needed_assets[asset['url']] == 'file' else '이미지 파일'
+            label = labels.get(needed_assets[asset['url']], '이미지 파일')
             message = label + ' 누락 또는 변경: ' + file_names.get(asset['url'], asset['url'])
             # Retain the expected location/hash so restoring the file can pass
             # a later offline verification without another download.
@@ -350,6 +366,13 @@ def verify_files(config: Config, state: State, control: TaskControl | None = Non
                 if not asset or asset['status'] != 'success':
                     errors.append('첨부파일 미완료: ' + file['name'])
                     content_ok = 0
+        if row['document'] and config.download_videos:
+            document = json.loads(row['document'])
+            if document.get('content_type') == 'video':
+                asset = state.asset(video_asset_key(document))
+                if not asset or asset['status'] != 'success':
+                    errors.append('동영상 파일 미완료: ' + document['title'])
+                    content_ok = 0
         if errors:
             state.update(row['blog'], row['post'], status='partial' if row['document'] else 'pending',
                          content_ok=content_ok, error='; '.join(errors))
@@ -384,6 +407,8 @@ def make_report(config: Config, state: State) -> dict:
         if needed_assets[asset['url']] == 'file':
             file = file_details[asset['url']]
             detail.update(kind='file', name=file['name'], url=file['url'])
+        elif needed_assets[asset['url']] == 'video':
+            detail.update(kind='video')
         asset_errors.append(detail)
     counts = {}
     for row in rows:
@@ -568,13 +593,14 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                                 # Checkpoint finished speech recognition before
                                 # a later cancellation or citation request.
                                 state.update(*key, document=json.dumps(document, ensure_ascii=False))
+                            save_video(config, state, client, document, control, file_assets)
                         discover_sources(config, state, client, control, row, document)
                         state.update(*key, document=json.dumps(document, ensure_ascii=False))
                         row = dict(state.get(*key), depth=row['depth'])
                         content, errors = format_note(config, state, row, assets, file_assets)
                         control.check()
                         write_note(config, state, row, content)
-                        own_errors = [e for e in errors if e.startswith(('이미지', '첨부파일', '영상'))]
+                        own_errors = [e for e in errors if e.startswith(('이미지', '첨부파일', '영상', '동영상'))]
                         state.update(*key, content_ok=not own_errors, status='partial' if errors else 'success', error='; '.join(errors))
                         title = document['title']
                         message = f'{"부분 성공" if errors else "저장 확인"}: {key[0]}/{key[1]} {title[:50]}'
@@ -701,7 +727,7 @@ def reformat_archive(config: Config, *, control: TaskControl | None = None) -> d
                 try:
                     content, errors = format_note(config, state, row)
                     updated += bool(write_note(config, state, row, content))
-                    state.update(row['blog'], row['post'], content_ok=not any(e.startswith(('이미지', '첨부파일', '영상')) for e in errors),
+                    state.update(row['blog'], row['post'], content_ok=not any(e.startswith(('이미지', '첨부파일', '영상', '동영상')) for e in errors),
                                  status='partial' if errors else 'success', error='; '.join(errors))
                 except Exception as exc:
                     state.update(row['blog'], row['post'], status='partial', content_ok=0, error=str(exc))

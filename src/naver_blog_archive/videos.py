@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 from html import unescape
 import math
+import os
 from pathlib import Path
 import re
 import tempfile
 import time
 import xml.etree.ElementTree as ET
 
+from .files import inside
 from .progress import TaskControl
 
 
@@ -17,6 +20,7 @@ TRANSCRIPT_VERSION = 1
 MAX_CAPTION_BYTES = 8 * 1024 * 1024
 MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DOWNLOAD_SECONDS = 3600
+VIDEO_FOLDER = 'attachments/videos'
 
 
 def transcript_complete(document: dict) -> bool:
@@ -33,6 +37,98 @@ def video_errors(config, document: dict) -> list[str]:
             and not transcript_complete(document)):
         return ['영상 텍스트화 미완료: ' + (document.get('video_error') or '백업을 시작하면 자막 또는 음성을 처리합니다.')]
     return []
+
+
+def video_asset_key(document: dict) -> str:
+    # Playback URLs are short-lived credentials; the stable video identity is
+    # the asset key, so a renewed URL reuses the archived file.
+    return f"video:{document['blog_id']}/{document['post_id']}/{document['video_id']}"
+
+
+def saved_video(config, state, document: dict) -> str | None:
+    if document.get('content_type') != 'video' or not config.download_videos:
+        return None
+    asset = state.asset(video_asset_key(document))
+    if asset and asset['status'] == 'success' and asset['path']:
+        try:
+            if inside(config.out_dir, asset['path']).is_file():
+                return asset['path']
+        except ValueError:
+            return None
+    return None
+
+
+def video_file_error(config, state, document: dict) -> str | None:
+    if document.get('content_type') != 'video' or not config.download_videos or saved_video(config, state, document):
+        return None
+    asset = state.asset(video_asset_key(document))
+    detail = asset['error'] if asset and asset['error'] else '다음 백업에서 동영상 파일을 저장합니다.'
+    return '동영상 파일 저장 미완료: ' + detail
+
+
+def _safe_error(exc: Exception) -> str:
+    message = str(exc)
+    # Signed playback URLs must never enter the DB, logs or Markdown.
+    if isinstance(exc, ValueError) and 'http' not in message.lower() and '?' not in message:
+        return message
+    return f'동영상 저장 오류 ({type(exc).__name__}). 다시 백업하면 재시도합니다.'
+
+
+def save_video(config, state, client, document: dict, control: TaskControl, files) -> str | None:
+    """Keep the best authorized MP4 as a verified, resumable archive file."""
+    if document.get('content_type') != 'video' or not config.download_videos:
+        return None
+    key = video_asset_key(document)
+    saved = state.asset(key)
+    if saved and files._verified(saved['path'], saved['file_hash']):
+        if saved['status'] != 'success':
+            state.save_asset(key, saved['path'], saved['file_hash'], 'success')
+        return saved['path']
+    from .file_assets import _safe_name
+    from .premium import PremiumLoginRequired
+    from .premium_media import resolve_media
+    temporary = None
+    try:
+        control.check()
+        control.emit('video-save', '동영상 파일 정보 확인 중')
+        media = resolve_media(client, document['blog_id'], document['post_id'], control=control)
+        if media.get('video_id') != document.get('video_id'):
+            raise ValueError('영상이 변경되었습니다. 기존 글도 최신 내용으로 갱신을 선택하세요.')
+        url = media.get('video_url')
+        if not url:
+            raise ValueError('저장할 수 있는 일반 MP4 동영상 파일이 제공되지 않습니다.')
+        root = inside(config.out_dir, VIDEO_FOLDER)
+        root.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix='.download-', suffix='.tmp', dir=root)
+        os.close(fd)
+        temporary = Path(name)
+        checksum = hashlib.sha256()
+        _read_resource(client, url, control, config.max_video_mb * 1024 * 1024, temporary,
+                       label='동영상 파일 저장 중', phase='video-save', checksum=checksum)
+        with temporary.open('rb') as stream:
+            if stream.read(12)[4:8] != b'ftyp':
+                raise ValueError('MP4 동영상 대신 다른 응답이 반환되었습니다.')
+        control.check()
+        file_hash = checksum.hexdigest()
+        relative = files._existing_content(file_hash)
+        if relative is None:
+            parent = f'{VIDEO_FOLDER}/{file_hash}'
+            title = (document.get('title') or '').strip() or '동영상'
+            relative = parent + '/' + _safe_name(title + '.mp4', inside(config.out_dir, parent))
+            files._publish(temporary, relative, file_hash)
+        state.save_asset(key, relative, file_hash, 'success')
+        control.emit('video-save', '동영상 파일 저장 완료')
+        return relative
+    except Exception as exc:
+        if isinstance(exc, PremiumLoginRequired):
+            raise
+        # Keep the last known path and checksum so a restored file verifies.
+        state.save_asset(key, saved['path'] if saved else None, saved['file_hash'] if saved else None,
+                         error=_safe_error(exc))
+        return None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def video_markdown(config, document: dict) -> str:
@@ -127,7 +223,8 @@ def _escape_text(text: str) -> str:
     return re.sub(r'([\\`*_{}\[\]<>#|+~=$!-])', r'\\\1', text)
 
 
-def _read_resource(client, url: str, control: TaskControl, limit: int, output: Path | None = None):
+def _read_resource(client, url: str, control: TaskControl, limit: int, output: Path | None = None,
+                   *, label: str = '음성 인식용 파일 받는 중', phase: str = 'video-download', checksum=None):
     from .premium_media import media_url_allowed
     if not media_url_allowed(url):
         raise ValueError('안전한 영상 자원 주소를 확인할 수 없습니다.')
@@ -149,16 +246,24 @@ def _read_resource(client, url: str, control: TaskControl, limit: int, output: P
                 size += len(chunk)
                 if size > limit:
                     raise ValueError('영상 자원 크기 제한을 초과했습니다.')
+                if checksum is not None:
+                    checksum.update(chunk)
                 if stream:
                     stream.write(chunk)
                 else:
                     chunks.append(chunk)
                 if output and time.monotonic() - last_notice >= 1:
-                    control.emit('video-download', f'음성 인식용 파일 받는 중: {size / 1024 / 1024:.1f} MB',
+                    control.emit(phase, f'{label}: {size / 1024 / 1024:.1f} MB',
                                  bytes=size, total_bytes=total)
                     last_notice = time.monotonic()
+            encoding = str(response.headers.get('Content-Encoding', '')).strip().lower()
+            if total is not None and encoding in ('', 'identity') and total != size:
+                raise ValueError('영상 자원 응답 크기가 일치하지 않습니다. 다운로드가 불완전합니다.')
         if not size:
             raise ValueError('영상 자원이 비어 있습니다.')
+        if stream:
+            stream.flush()
+            os.fsync(stream.fileno())
         return b''.join(chunks) if output is None else size
     finally:
         if stream:

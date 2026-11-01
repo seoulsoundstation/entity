@@ -422,7 +422,12 @@ def test_attachment_checkbox_is_enabled_by_default_and_independent_of_images(app
     assert app.files.get() is True
     checkboxes = {widget['text']: widget for widget in app._input_widgets
                   if isinstance(widget, gui.ttk.Checkbutton)}
-    assert len(checkboxes) == 5
+    assert len(checkboxes) == 6
+    assert app.read_config().download_videos is False
+    checkboxes['동영상 파일 저장'].invoke()
+    assert app.read_config().download_videos is True
+    assert '동영상 파일' in app.option_summary.get()
+    checkboxes['동영상 파일 저장'].invoke()
     checkboxes['이미지 저장'].invoke()
     assert app.read_config().download_images is False
     assert app.read_config().download_files is True
