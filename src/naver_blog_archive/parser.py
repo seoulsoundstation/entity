@@ -174,11 +174,20 @@ def compose(document: dict, replacements: dict[str, str]) -> bytes:
         # longest tokens first in one pass, without reprocessing inserted text.
         pattern = '|'.join(re.escape(token) for token in sorted(replacements, key=len, reverse=True))
         body = re.sub(pattern, lambda match: replacements[match.group()], body)
-    metadata = {key: document[key] for key in ('title', 'blog_id', 'post_id', 'archived_at')}
+    category = document.get('category') or []
+    metadata = {'title': document['title']}
+    if category:
+        metadata = {'title': f"[{' > '.join(category)}] {document['title']}", 'original_title': document['title']}
+    metadata.update((key, document[key]) for key in ('blog_id', 'post_id', 'archived_at'))
     metadata['source_url'] = post_url(document['blog_id'], document['post_id'])
     if document.get('published_at'):
         metadata['published_at'] = document['published_at']
+    if category:
+        metadata['category'] = '/'.join(category)
     # JSON scalar strings are valid YAML and safely handle quotes in titles.
-    frontmatter = '\n'.join(f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in metadata.items())
+    lines = [f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in metadata.items()]
+    if category:
+        lines += ['categories:'] + [f'  - {json.dumps(name, ensure_ascii=False)}' for name in category]
+    frontmatter = '\n'.join(lines)
     title = document['title'].replace('\n', ' ')
     return f'---\n{frontmatter}\n---\n\n# {title}\n\n{body}\n'.encode('utf-8')

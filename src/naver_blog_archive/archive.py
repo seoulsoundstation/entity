@@ -18,7 +18,7 @@ from .config import Config
 from .file_assets import FileAssets
 from .files import archive_lock, atomic_write, digest, inside
 from .network import Client, Renderer, apply_premium_cookies, parse_post_url, post_url
-from .note_paths import migrate_note_names, recover_note_moves, titled_path
+from .note_paths import mark_category_named, migrate_note_names, recover_note_moves, titled_path
 from .parser import compose, extract_post, md_link
 from .progress import OperationCancelled, TaskControl
 from .state import State
@@ -150,6 +150,9 @@ def note_path(config: Config, row) -> str:
 
 def write_note(config: Config, state: State, row, content: bytes):
     relative = note_path(config, row)
+    if not row['path'] and row['document']:
+        # A first save already includes the category in its filename.
+        mark_category_named(state, row, json.loads(row['document']))
     path = inside(config.out_dir, relative)
     if path.exists():
         if not row['file_hash'] or digest(path) != row['file_hash']:
@@ -438,6 +441,19 @@ def discover_sources(config: Config, state: State, client, control: TaskControl,
             state.discover(*source['target'], depth=row['depth'] + 1)
 
 
+def apply_categories(config: Config, state: State, categories: dict[str, list[str]], control: TaskControl) -> None:
+    """Record the listing's current category in already saved documents."""
+    for post, category in categories.items():
+        control.check()
+        row = state.get(config.blog_id, post)
+        if not row or not row['document']:
+            continue
+        document = json.loads(row['document'])
+        if document.get('category') != category:
+            document['category'] = category
+            state.update(config.blog_id, post, document=json.dumps(document, ensure_ascii=False))
+
+
 def reusable_post(config: Config, row, document) -> bool:
     if row['status'] != 'success' or not row['content_ok'] or not row['path'] or not document:
         return False
@@ -508,6 +524,7 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
             for post in listing.ids:
                 control.check()
                 state.discover(config.blog_id, post)
+            apply_categories(config, state, listing.categories, control)
             message = f'목록: {len(listing.ids)}개 / 수집 {"완료" if listing.complete else "미완료: " + listing.error}'
             print(message)
             control.emit('listing', message, listed=len(listing.ids), total=listing.total,
@@ -571,6 +588,11 @@ def backup(config: Config, *, refresh: bool = False, client=None, renderer=None,
                                     and transcript_complete(cached_document)):
                                 for field in ('video_transcript', 'video_text'):
                                     document[field] = cached_document[field]
+                            for field in ('category', 'category_named'):
+                                if cached_document and field in cached_document:
+                                    document[field] = cached_document[field]
+                            if key[0] == config.blog_id and key[1] in listing.categories:
+                                document['category'] = listing.categories[key[1]]
                             control.check()
                             state.update(*key, document=json.dumps(document, ensure_ascii=False), content_ok=0)
                             control.wait(config.delay)

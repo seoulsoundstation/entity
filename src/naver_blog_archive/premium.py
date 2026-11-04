@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 import requests
 
 from .addresses import PREMIUM_HOST, channel_url, is_premium, parse_post_url, post_url
-from .network import Client, Listing, Renderer
+from .network import Client, Listing, Renderer, category_name
 
 
 _TEMPLATE = 'SCS_PREMIUM_CONTENT_LIST'
@@ -175,6 +175,21 @@ def parse_content_list(html: str, blog: str) -> tuple[list[str], str | None, boo
     return ids, cursor, more, total
 
 
+def parse_content_categories(html: str, blog: str) -> dict[str, list[str]]:
+    """A Premium channel shows one category level beside each listed post."""
+    result = {}
+    soup = BeautifulSoup(html, 'html.parser')
+    for listing in soup.select('ul._CONTENT_LIST'):
+        for item in listing.select('li.content_item'):
+            anchor = item.select_one('a.content_text_link[href]')
+            label = item.select_one('a.content_category')
+            key = parse_post_url(urljoin(channel_url(blog), anchor['href'])) if anchor else None
+            name = category_name(label.get_text(' ', strip=True)) if label else ''
+            if key and key[0] == blog and name:
+                result[key[1]] = [name]
+    return result
+
+
 class PremiumClient(Client):
     """List through the same public template request used by normal scrolling."""
 
@@ -184,6 +199,7 @@ class PremiumClient(Client):
         _, owner, channel = blog.split('/')
         ids, seen, cursors = [], set(), set()
         cursor, total = None, None
+        categories = {}
         for page in range(1, self.config.max_pages + 1):
             self.check()
             if self.control:
@@ -212,6 +228,7 @@ class PremiumClient(Client):
                         raise _login_error()
                 self.check()
                 page_ids, next_cursor, more, page_total = parse_content_list(html, blog)
+                categories.update(parse_content_categories(html, blog))
                 if page_total is not None:
                     total = page_total
                 added = 0
@@ -223,14 +240,14 @@ class PremiumClient(Client):
                 if not more:
                     if total is not None and len(ids) < total:
                         raise ValueError(f'목록 누락: 수집 {len(ids)} / 응답 전체 {total}')
-                    return Listing(ids, True, total=total)
+                    return Listing(ids, True, total=total, categories=categories)
                 if not added or next_cursor in cursors:
                     raise ValueError('같은 글 목록 또는 다음 페이지가 반복되어 수집을 중단했습니다.')
                 cursors.add(next_cursor)
                 cursor = next_cursor
             except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
-                return Listing(ids, False, str(exc), total)
-        return Listing(ids, False, '목록 수집 페이지 상한에 도달했습니다.', total)
+                return Listing(ids, False, str(exc), total, categories)
+        return Listing(ids, False, '목록 수집 페이지 상한에 도달했습니다.', total, categories)
 
 
 class PremiumRenderer(Renderer):

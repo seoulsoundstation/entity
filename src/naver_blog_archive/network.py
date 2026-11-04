@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 import time
@@ -41,6 +41,29 @@ class Listing:
     complete: bool
     error: str = ''
     total: int | None = None
+    # Post ID -> category path from the top level, e.g. ['투자 생각', '시장 단상'].
+    categories: dict[str, list[str]] = field(default_factory=dict)
+
+
+def category_name(value) -> str:
+    return ' '.join(value.split()) if isinstance(value, str) else ''
+
+
+def category_paths(tree: dict[str, tuple[str, str | None]], found: dict[str, tuple[str, str]]) -> dict[str, list[str]]:
+    """Resolve each post's category number to a path, tolerating a stale tree."""
+    result = {}
+    for post, (number, fallback) in found.items():
+        path, seen, current = [], set(), number
+        while current in tree and current not in seen and len(path) < 10:
+            seen.add(current)
+            name, parent = tree[current]
+            if name:
+                path.insert(0, name)
+            current = parent
+        path = path or ([fallback] if fallback else [])
+        if path:
+            result[post] = path
+    return result
 
 
 class _PremiumCookieSession(requests.Session):
@@ -165,6 +188,31 @@ class Client:
             return response.url
 
     def listing(self, blog: str) -> Listing:
+        found = {}
+        result = self._list_posts(blog, found)
+        result.categories = self._category_paths(blog, found)
+        return result
+
+    def _category_paths(self, blog: str, found: dict[str, tuple[str, str]]) -> dict[str, list[str]]:
+        if not found:
+            return {}
+        tree = {}
+        try:
+            self.check()
+            with self.get(f'https://m.blog.naver.com/api/blogs/{blog}/category-list') as response:
+                raw = json.loads(re.sub(r"^[)\]}',]*\s*", '', response.text.strip()))
+            result = raw.get('result', raw)
+            for item in result.get('mylogCategoryList') or []:
+                number, parent = item.get('categoryNo'), item.get('parentCategoryNo')
+                if number is not None:
+                    tree[str(number)] = (category_name(item.get('categoryName')),
+                                         None if parent is None else str(parent))
+        except (requests.RequestException, ValueError, TypeError, AttributeError):
+            # The listing's own leaf category names remain a usable fallback.
+            tree = {}
+        return category_paths(tree, found)
+
+    def _list_posts(self, blog: str, found: dict[str, tuple[str, str]]) -> Listing:
         ids, seen, total = [], set(), None
         for page in range(1, self.config.max_pages + 1):
             self.check()
@@ -196,6 +244,8 @@ class Client:
                     if value is None or not str(value).isdigit():
                         raise ValueError('글 번호가 없는 목록 항목입니다.')
                     value = str(value)
+                    if item.get('categoryNo') is not None:
+                        found[value] = (str(item['categoryNo']), category_name(item.get('categoryName')))
                     if value not in seen:
                         seen.add(value)
                         ids.append(value)

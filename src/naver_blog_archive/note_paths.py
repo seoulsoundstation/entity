@@ -18,7 +18,11 @@ def _units(value: str) -> int:
 
 def titled_path(config, row) -> str:
     document = json.loads(row['document']) if row['document'] else {}
-    title = unicodedata.normalize('NFC', document.get('title') or '제목 없음')
+    title = document.get('title') or '제목 없음'
+    if document.get('category'):
+        # '/' and '>' are not allowed in Windows filenames.
+        title = f"[{' - '.join(document['category'])}] {title}"
+    title = unicodedata.normalize('NFC', title)
     title = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', ' ', title)
     title = re.sub(r'\s+', ' ', title).strip(' .') or '제목 없음'
     if re.match(r'^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)', title, re.I):
@@ -35,12 +39,19 @@ def titled_path(config, row) -> str:
     return f'{parent}/{title.rstrip(" .")}{suffix}'
 
 
+def mark_category_named(state, row, document: dict) -> None:
+    if document.get('category') and not document.get('category_named'):
+        document['category_named'] = True
+        state.update(row['blog'], row['post'], document=json.dumps(document, ensure_ascii=False))
+
+
 def _finish_move(config, state, journal: Path):
     entry = json.loads(journal.read_text(encoding='utf-8'))
     blog, post = entry['blog'], entry['post']
     row = state.get(blog, post)
     old, new, checksum = entry['old'], entry['new'], entry['hash']
-    if (not row or old != f'posts/{blog}/{post}.md'
+    if (not row or Path(old).parent.as_posix() != f'posts/{blog}'
+            or not (old == f'posts/{blog}/{post}.md' or old.endswith(f' ({post}).md'))
             or Path(new).parent.as_posix() != f'posts/{blog}'
             or not new.endswith(f' ({post}).md') or row['path'] not in (old, new)):
         raise ValueError('파일명 변경 기록을 확인해야 합니다: ' + journal.name)
@@ -107,11 +118,22 @@ def migrate_note_names(config, state, control=None, *, rows=None) -> tuple[int, 
                         blocked.add(by_path[target])
     for row in rows:
         control.check()
-        old = f'posts/{row["blog"]}/{row["post"]}.md'
-        # Keep user-named legacy files and already assigned title paths stable,
-        # even when the author changes the title during a later refresh.
-        if row['path'] != old or not row['document']:
+        if not row['document']:
             continue
+        old = row['path']
+        document = json.loads(row['document'])
+        # Keep user-named legacy files and already assigned title paths stable,
+        # even when the author changes the title during a later refresh. A
+        # titled name gains its category prefix only once, so later category
+        # changes on Naver update the properties but never move the file again.
+        if old != f'posts/{row["blog"]}/{row["post"]}.md':
+            if (not document.get('category') or document.get('category_named') or not old
+                    or Path(old).parent.as_posix() != f'posts/{row["blog"]}'
+                    or not old.endswith(f' ({row["post"]}).md')):
+                continue
+            if titled_path(config, row) == old:
+                mark_category_named(state, row, document)
+                continue
         if (row['blog'], row['post']) in blocked:
             problems.append('보존된 글의 링크 유지를 위해 파일명 변경 보류: ' + old)
             continue
@@ -131,6 +153,7 @@ def migrate_note_names(config, state, control=None, *, rows=None) -> tuple[int, 
             entry = dict(blog=row['blog'], post=row['post'], old=old, new=new, hash=row['file_hash'])
             atomic_write(journal, json.dumps(entry, ensure_ascii=False).encode('utf-8'))
             _finish_move(config, state, journal)
+            mark_category_named(state, row, document)
             renamed += 1
             control.emit('formatting', '제목으로 파일명 변경: ' + new)
         except Exception as exc:
