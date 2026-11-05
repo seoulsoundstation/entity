@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
+from pathlib import Path
 import re
 from urllib.parse import quote, urljoin, urlsplit
 from uuid import uuid4
@@ -13,9 +15,22 @@ from .attachment_links import extract_file_links
 from .network import ARTICLE_BODY_SELECTORS, NON_CONTENT_SELECTOR, parse_post_url, post_url
 
 
+# Obsidian decodes local link paths with JavaScript's decodeURI, which keeps
+# escapes of URI-reserved characters such as %2C (,) and %2B (+) undecoded, so
+# such a link points to a file that does not exist. These characters are valid
+# literally in a link path. '#' and '?' stay escaped: they would start a
+# fragment or a query.
+LOCAL_LINK_SAFE = '/,+;=&@$'
+
+
+def local_href(path, base) -> str:
+    """A relative link path that Obsidian, browsers and Markdown viewers resolve."""
+    return quote(Path(os.path.relpath(path, base)).as_posix(), safe=LOCAL_LINK_SAFE)
+
+
 def md_link(label: str, url: str, image: bool = False) -> str:
     label = re.sub(r'([\\\[\]|])', r'\\\1', re.sub(r'[\r\n]+', ' ', label))
-    return f'{"!" if image else ""}[{label}]({quote(url, safe="/:?&=%+#@;,")})'
+    return f'{"!" if image else ""}[{label}]({quote(url, safe="/:?&=%+#@;,$")})'
 
 
 def image_source(img, base_url: str) -> str:

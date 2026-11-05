@@ -19,7 +19,7 @@ from .file_assets import FileAssets
 from .files import archive_lock, atomic_write, digest, inside
 from .network import Client, Renderer, apply_premium_cookies, parse_post_url, post_url
 from .note_paths import mark_category_named, migrate_note_names, recover_note_moves, titled_path
-from .parser import compose, extract_post, md_link
+from .parser import compose, extract_post, local_href, md_link
 from .progress import OperationCancelled, TaskControl
 from .state import State
 from .videos import (save_video, saved_video, transcript_complete, transcribe_video, video_asset_key,
@@ -178,7 +178,7 @@ def format_note(config: Config, state: State, row, download=None, file_download=
         if config.download_videos:
             local = saved_video(config, state, document)
             if local:
-                target = quote(Path(os.path.relpath(inside(config.out_dir, local), base)).as_posix(), safe='/')
+                target = local_href(inside(config.out_dir, local), base)
                 document['markdown'] += '\n\n' + md_link('동영상 파일: ' + Path(local).name, target)
             else:
                 error = video_file_error(config, state, document)
@@ -196,7 +196,7 @@ def format_note(config: Config, state: State, row, download=None, file_download=
                     local = asset['path']
             if not local:
                 errors.append('이미지 저장 실패: ' + image['url'])
-        target = quote(Path(os.path.relpath(inside(config.out_dir, local), base)).as_posix(), safe='/') if local else image['url']
+        target = local_href(inside(config.out_dir, local), base) if local else image['url']
         replacements[image['token']] = md_link(image['alt'], target, image=True) if target else '[이미지 URL 누락]'
         image_targets[image['token']] = target if local or not config.download_images else None
     for file in document.get('files', []):
@@ -211,7 +211,7 @@ def format_note(config: Config, state: State, row, download=None, file_download=
                     local = asset['path']
             if not local:
                 errors.append('첨부파일 저장 실패: ' + file['name'] + ' · ' + file['url'])
-        target = quote(Path(os.path.relpath(inside(config.out_dir, local), base)).as_posix(), safe='/') if local else file['url']
+        target = local_href(inside(config.out_dir, local), base) if local else file['url']
         text = md_link('첨부파일: ' + file['name'], target)
         text += ' · ' + md_link('원문에서 다운로드', post_url(row['blog'], row['post']))
         if config.download_files and not local:
@@ -221,20 +221,20 @@ def format_note(config: Config, state: State, row, download=None, file_download=
         target = source.get('target')
         href = source['url']
         if source.get('kind') == 'link_card':
-            local_href = None
+            card_href = None
             saved = state.get(*target) if target else None
             local_path = inside(config.out_dir, saved['path']) if saved and saved['path'] else None
             # A readable note is still a valid destination when its images are
             # incomplete or the user has edited it. Write protection is separate.
             if local_path and local_path.suffix.lower() == '.md' and local_path.is_file():
-                local_href = quote(Path(os.path.relpath(local_path, base)).as_posix(), safe='/')
-            replacements[source['token']] = format_link_card(source, image_targets.get(source.get('thumbnail_token')), local_href)
+                card_href = local_href(local_path, base)
+            replacements[source['token']] = format_link_card(source, image_targets.get(source.get('thumbnail_token')), card_href)
             continue
         follow = config.follow_sources and row['depth'] < config.source_depth and source_in_scope(config, target)
         if follow and target:
             saved = state.get(*target)
             if saved and saved['content_ok'] and saved['path'] and inside(config.out_dir, saved['path']).is_file():
-                href = quote(Path(os.path.relpath(inside(config.out_dir, saved['path']), base)).as_posix(), safe='/')
+                href = local_href(inside(config.out_dir, saved['path']), base)
             else:
                 errors.append('출처 저장 미완료: ' + source['url'])
         if follow and source.get('resolve_error'):
@@ -243,7 +243,7 @@ def format_note(config: Config, state: State, row, download=None, file_download=
     return compose(document, replacements), errors
 
 
-def format_link_card(source: dict, thumbnail: str | None, local_href: str | None = None) -> str:
+def format_link_card(source: dict, thumbnail: str | None, note_href: str | None = None) -> str:
     """A native Obsidian callout, also readable as ordinary Markdown."""
     title = re.sub(r'\s+', ' ', source.get('title') or source['url']).strip()
     description = re.sub(r'\s+', ' ', source.get('description') or '').strip()
@@ -255,7 +255,7 @@ def format_link_card(source: dict, thumbnail: str | None, local_href: str | None
     description = re.sub(r'^(\d+)([.)]) ', r'\1\\\2 ', description)
     title = re.sub(r'([\\`*_{}\[\]<>|~=$])', r'\\\1', title)
     domain = urlsplit(source['url']).hostname or source.get('domain') or '원문'
-    destination = quote(local_href or source['url'], safe='/:?&=%+#@;,')
+    destination = quote(note_href or source['url'], safe='/:?&=%+#@;,$')
     lines = ['[!info] [' + title + '](' + destination + ')']
     if thumbnail:
         # A numeric image label is Obsidian's Markdown image-width syntax.
@@ -266,8 +266,8 @@ def format_link_card(source: dict, thumbnail: str | None, local_href: str | None
     if description:
         lines.extend(['', description])
     footer = md_link(domain + ' ↗', source['url'])
-    if local_href:
-        footer += ' · ' + md_link('보관된 글 열기', local_href)
+    if note_href:
+        footer += ' · ' + md_link('보관된 글 열기', note_href)
     lines.extend(['', footer])
     return '\n'.join('> ' + line if line else '>' for line in lines)
 
